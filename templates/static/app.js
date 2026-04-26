@@ -64,13 +64,17 @@ function badgeHtml(status){
 }
 
 // ── Logs ─────────────────────────────────────────────────────────────────────
+const LOG_MAX = 60;
+
 function log(msg, cls='l-info'){
   const t = new Date().toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
-  const line = `<div class="log-line ${cls}">${t}  ${esc(msg)}</div>`;
   ['logbar','pipeline-log'].forEach(id => {
     const el = $(id); if(!el) return;
-    el.insertAdjacentHTML('beforeend', line);
-    while(el.children.length > 80) el.firstChild.remove();
+    const line = document.createElement('div');
+    line.className = `log-line ${cls}`;
+    line.textContent = `${t}  ${msg}`;
+    el.appendChild(line);
+    while(el.children.length > LOG_MAX) el.firstChild.remove();
     el.scrollTop = el.scrollHeight;
   });
 }

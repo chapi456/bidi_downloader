@@ -483,15 +483,31 @@ def cmd_show(args):
                        ("Durée", "duration")]:
         if email.get(key):
             print(f"  {label:<12} {email[key]}")
-    files = email.get("media_files", [])
-    files = email.get("media_files", [])
-    if files:
-        print(bold(f"\n  Fichiers media ({len(files)}) :"))
-        for f in files:
-            primary = yellow(" ★") if f.get("is_primary") else ""
-            size = f"{f['file_size']//1024}KB" if f.get("file_size") else ""
-            print(f"  {(f.get('file_type','')):<8} {str(f.get('file_path',''))[:60]}"
-                  f" {dim(size)}{primary}")
+    files = email.get("media_files") or email.get("mediaitems") or []
+    media_files  = [f for f in files if f.get("file_type") != "thumbnail"]
+    thumb_files  = [f for f in files if f.get("file_type") == "thumbnail"]
+
+    if media_files:
+        print(bold(f"\n  Fichiers media ({len(media_files)}) :"))
+        for f in media_files:
+            primary  = yellow(" ★") if f.get("is_primary") else ""
+            size_raw = f.get("file_size") or f.get("filesize") or 0
+            size     = f"{size_raw//1024}KB" if size_raw else ""
+            fname    = str(f.get("file_path") or f.get("filepath") or "–")
+            url      = f.get("url") or ""
+            print(f"  {(f.get('file_type','')):<10} {fname[:55]}"
+                  f"  {dim(size)}{primary}")
+            if url:
+                print(f"  {'':10} {dim(url)}")
+
+    if thumb_files:
+        print(bold(f"\n  Thumbnails ({len(thumb_files)}) :"))
+        for f in thumb_files:
+            fname = str(f.get("file_path") or f.get("filepath") or "–")
+            url   = f.get("url") or ""
+            print(f"  {'thumbnail':<10} {fname[:55]}")
+            if url:
+                print(f"  {'':10} {dim(url)}")
 
     post_body = email.get("post_body") or ""
     post_comments = email.get("post_comments") or []

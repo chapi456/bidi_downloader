@@ -105,13 +105,16 @@ def _serialize_email(email: dict) -> dict:
             "id":         f["id"],
             "url":        _media_url(fp),
             "file_type":  ft,
-            "filetype":   ft,          # alias attendu par app.js
-            "is_primary": bool(f.get("is_primary")),
+            "filetype":   ft,
+            "file_path":  fp,
+            "file_size":  f.get("filesize") or f.get("file_size"),
             "filesize":   f.get("filesize") or f.get("file_size"),
+            "is_primary": bool(f.get("is_primary")),
         })
 
     email["media_items"]     = media_items
     email["mediaitems"]      = media_items   # alias app.js v3
+    email["media_files"]     = media_items   # alias attendu par buildCard() / renderModal()
     email["media_count"]     = len(media_items)
     email["download_tasks"]  = tasks
     return email
@@ -234,8 +237,14 @@ if __name__ == "__main__":
             msg = record.getMessage()
             return not ('"GET /api/status' in msg and '" 200 ' in msg)
 
+    # Appliquer le filtre AVANT uvicorn.run() ET via log_config
     logging.getLogger("uvicorn.access").addFilter(_SuppressStatusOK())
 
     uvicorn.run(app, host=host, port=port, log_level="info",
-                timeout_graceful_shutdown=1)
+                timeout_graceful_shutdown=1,
+                access_log=True)
+
+    # Re-appliquer après run (au cas où uvicorn réinitialise le logger)
+    logging.getLogger("uvicorn.access").addFilter(_SuppressStatusOK())
+    
     os._exit(0)

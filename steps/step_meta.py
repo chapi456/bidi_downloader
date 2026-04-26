@@ -205,11 +205,22 @@ def _extract_reddit_meta(items: list[dict]) -> dict:
         subcategory = item.get("subcategory", "") or item.get("_type", "")
         if subcategory in ("submission", "post") or ("title" in item and submission is None):
             submission = item
-            for key in ("thumbnail", "preview", "url"):
+            # Chercher thumbnail : champ direct d'abord
+            for key in ("thumbnail", "url"):
                 val = item.get(key)
                 if val and isinstance(val, str) and val.startswith("http"):
                     thumbnail_url = val
                     break
+            # Puis dans preview.images[0].source.url (format API Reddit)
+            if not thumbnail_url:
+                try:
+                    preview = item.get("preview") or {}
+                    if isinstance(preview, dict):
+                        src = preview["images"][0]["source"]["url"]
+                        if src and src.startswith("http"):
+                            thumbnail_url = src.replace("&amp;", "&")
+                except (KeyError, IndexError, TypeError):
+                    pass
         elif subcategory == "comment" or ("body" in item and submission is not None):
             body = (item.get("body") or "").strip()
             if body and body not in ("[deleted]", "[removed]"):

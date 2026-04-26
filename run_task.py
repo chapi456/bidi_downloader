@@ -57,9 +57,10 @@ def _build_gdl_config(cookies_path: Optional[str] = None) -> dict:
         "extractor": {
             "skip": True,
             "reddit": {
-                "filename": "{id}_{subreddit}.{extension}",
+                "filename": "{id}_{num:>02}_{subreddit}.{extension}",
                 "videos": True,
                 "previews": True,
+                "external": True,
                 "comments": 0,
                 "recursion": 0,
             },
@@ -377,8 +378,15 @@ def run_task(db: BiDiDB, task: dict, email: dict, progress_cb=None) -> bool:
     url        = task["url"] 
     downloader = task.get("downloader") or "gallery-dl"
     platform   = email.get("platform") or _detect_platform(url)
-    known_kws  = email.get("known_keywords") or []
-
+    _kw_raw = email.get("known_keywords") or []
+    if isinstance(_kw_raw, str):
+        try:
+            import json as _json
+            _kw_raw = _json.loads(_kw_raw)
+        except Exception:
+            _kw_raw = []
+    known_kws = _kw_raw if isinstance(_kw_raw, list) else []
+    
     # Wrapper interne : log + DB + callback externe
     _ext_cb = progress_cb
     def _progress(pct: int) -> None:
@@ -459,7 +467,10 @@ def run_task(db: BiDiDB, task: dict, email: dict, progress_cb=None) -> bool:
 
     # ── Move vers dest_dir ────────────────────────────────────────────────
     final_files = _move_files_to_dest(raw_files, dest_dir)
-    shutil.rmtree(tmp_dir, ignore_errors=True)
+    try:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    except Exception as e:
+        logger.warning(f"[task={task_id}] rmtree échoué (ignoré): {e}")
     logger.info(f"[task={task_id}] fichiers déplacés vers {dest_dir}")
 
     # ── Hardlinks vers keywords secondaires ───────────────────────────────

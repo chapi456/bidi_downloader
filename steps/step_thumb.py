@@ -27,6 +27,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import json as _json
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -126,144 +128,6 @@ def _remove_stale_thumb(db: BiDiDB, email_id: int, save_dir: Path, keep: Path) -
             logger.info(f"[thumb] suppression DB stale thumb id={mf['id']} ({mf['file_path']})")
             db.delete_media_file(mf["id"])
 
-
-# ── Renommage de TOUS les fichiers media ──────────────────────────────────────
-
-def _rename_media_file(
-    old_path: Path,
-    save_dir: Path,
-    keyword: str,
-    suffix: str,
-) -> Path:
-    """
-    Renomme old_path en <keyword>_<suffix><ext> dans le même dossier.
-    Si le fichier cible existe déjà, retourne old_path sans modifier.
-    """
-    new_name = f"{keyword}_{suffix}{old_path.suffix.lower()}"
-    new_path = old_path.parent / new_name
-    if new_path == old_path:
-        return old_path
-    if new_path.exists():
-        logger.info(f"[rename] cible déjà existante : {new_name} → skip")
-        return new_path
-    try:
-        old_path.rename(new_path)
-        logger.info(f"[rename] {old_path.name} → {new_name}")
-    except Exception as e:
-        logger.warning(f"[rename] échec {old_path.name} → {new_name} : {e}")
-        return old_path
-    return new_path
-
-
-def _rename_all_media_files(
-    db: BiDiDB,
-    email_id: int,
-    save_dir: Path,
-    keyword: str,
-) -> None:
-    """
-    Renomme TOUS les fichiers media (vidéos + images + thumbnails) associés
-    à l'email selon le schéma : <keyword>_<N><ext>
-    Met à jour le file_path en DB pour chacun.
-
-    Règles :
-    - Les fichiers .thumb.* gardent le suffixe .thumb dans le nouveau nom.
-    - Les vidéos/images sont numérotées dans l'ordre (1, 2, …).
-    - Les hardlinks dans les dossiers keywords secondaires sont recréés
-      après renommage.
-    """
-    media_files = db.get_media_files(email_id)
-    if not media_files:
-        return
-
-    video_idx = 1
-    thumb_idx = 1
-
-    for mf in media_files:
-        file_type = mf.get("file_type", "")
-        old_rel   = mf["file_path"]
-        old_abs   = save_dir / old_rel
-        # Gérer les paths absolus en DB (cas rare)
-        if not old_abs.exists():
-            old_abs = Path(old_rel)
-        if not old_abs.exists():
-            logger.warning(f"[rename] fichier introuvable sur disque : {old_rel}")
-            continue
-
-        # Choisir le suffixe selon le type
-        if file_type == "thumbnail":
-            suffix = f"{thumb_idx}.thumb"
-            thumb_idx += 1
-        elif file_type == "video":
-            suffix = str(video_idx)
-            video_idx += 1
-        elif file_type == "image":
-            suffix = str(video_idx)
-            video_idx += 1
-        else:
-            # Type inconnu → on renomme quand même pour cohérence
-            suffix = str(video_idx)
-            video_idx += 1
-
-        new_abs = _rename_media_file(old_abs, save_dir, keyword, suffix)
-
-        # Mettre à jour le path en DB si changé
-        if new_abs != old_abs:
-            try:
-                new_rel = str(new_abs.relative_to(save_dir))
-            except ValueError:
-                new_rel = str(new_abs)
-            # Utiliser as_posix() pour cohérence cross-platform
-            new_rel = Path(new_rel).as_posix()
-            try:
-                db.update_media_file_path(mf["id"], new_rel)
-                logger.info(f"[rename] DB mis à jour id={mf['id']} : {old_rel!r} → {new_rel!r}")
-            except Exception as e:
-                logger.error(f"[rename] échec MAJ DB id={mf['id']} : {e}")
-
-        # Mettre à jour les hardlinks dans les dossiers keywords secondaires
-        # (les hardlinks pointent vers le même inode → le rename du primaire
-        #  les rend incohérents. On les recrée.)
-        _refresh_hardlinks_for_file(new_abs, save_dir, old_abs.name)
-
-
-def _refresh_hardlinks_for_file(
-    new_file: Path,
-    save_dir: Path,
-    old_name: str,
-) -> None:
-    """
-    Parcourt tous les sous-dossiers de save_dir et remplace les hardlinks
-    portant l'ancien nom old_name par un hardlink vers new_file.
-    """
-    for kw_dir in save_dir.iterdir():
-        if not kw_dir.is_dir() or kw_dir.name.startswith("_"):
-            continue
-        old_link = kw_dir / old_name
-        if old_link.exists() and old_link.resolve() == new_file.resolve():
-            # Hardlink avec l'ancien nom → remplacer
-            new_link = kw_dir / new_file.name
-            if new_link.exists():
-                try:
-                    old_link.unlink()
-                except Exception:
-                    pass
-                continue
-            try:
-                import os
-                os.link(new_file, new_link)
-                old_link.unlink()
-                logger.info(f"[hardlink] refreshed : {old_name} → {new_file.name} dans {kw_dir.name}/")
-            except OSError:
-                try:
-                    import shutil
-                    shutil.copy2(new_file, new_link)
-                    old_link.unlink()
-                    logger.info(f"[copy] refreshed : {old_name} → {new_file.name} dans {kw_dir.name}/")
-                except Exception as e:
-                    logger.warning(f"[hardlink] refresh échoué pour {old_name} dans {kw_dir.name}/ : {e}")
-
-
 # ── Traitement principal d'un email ──────────────────────────────────────────
 
 def process_thumb(db: BiDiDB, email: dict) -> str:
@@ -288,16 +152,8 @@ def process_thumb(db: BiDiDB, email: dict) -> str:
         logger.info(f"  └─ id={mf['id']} type={mf.get('file_type')!r:12} "
                     f"primary={mf.get('is_primary')} path={mf.get('file_path')!r}")
 
-    # Keyword primaire pour le renommage
-    known_kws = email.get("known_keywords") or []
-    keyword   = known_kws[0] if known_kws else "download"
-
     # ── Étape 1 : S'assurer qu'un thumbnail existe pour chaque vidéo ──────────
     outcome = _ensure_thumbnails(db, eid, media_files, save_dir)
-
-    # ── Étape 2 : Renommer TOUS les fichiers selon le keyword primaire ─────────
-    logger.info(f"thumb {eid}: renommage fichiers avec keyword={keyword!r}")
-    _rename_all_media_files(db, eid, save_dir, keyword)
 
     db.advance_step(eid, "thumb_done")
     logger.info(f"thumb {eid}: thumb_done (outcome={outcome!r})")

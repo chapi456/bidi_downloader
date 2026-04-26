@@ -79,8 +79,14 @@ def _choose_downloader(url: str, platform: str | None = None) -> str:
 
 
 def _output_dir_for(email: dict) -> str:
+    import json as _json
     kws = email.get("known_keywords") or []
-    return kws[0] if kws else "download"
+    if isinstance(kws, str):
+        try:
+            kws = _json.loads(kws)
+        except Exception:
+            kws = []
+    return kws[0] if (isinstance(kws, list) and kws) else "download"
 
 
 def _reap(procs: list) -> list:
@@ -103,6 +109,17 @@ def count(db, cfg) -> int:
 
 
 def run(db: BiDiDB, cfg, on_progress=None) -> dict:
+    # Nettoyage _tmp résiduel du run précédent (tâches orphelines)
+    _tmp_dir = Path(cfg.get_save_dir()) / "_tmp"
+    if _tmp_dir.exists():
+        import shutil as _shutil
+        for child in _tmp_dir.iterdir():
+            try:
+                _shutil.rmtree(child, ignore_errors=True)
+                logger.info(f"[send] nettoyage résidu _tmp: {child.name}")
+            except Exception:
+                pass
+
     tasks = db.get_tasks_by_status("pending")
     run_task_script = ROOT / "run_task.py"
 
@@ -231,9 +248,12 @@ def run(db: BiDiDB, cfg, on_progress=None) -> dict:
         for proc in pool:
             try:
                 proc.wait(timeout=600)
+                rc = proc.returncode
+                if rc not in (0, None):
+                    logger.warning(f"[{dl_name}] pid={proc.pid} retcode={rc}")
             except subprocess.TimeoutExpired:
                 proc.kill()
-                logger.warning(f"[{dl_name}] pid={proc.pid} killed (timeout)")
+                logger.warning(f"[{dl_name}] pid={proc.pid} killed (timeout 600s)")
 
     logger.info(f"step_send terminé — {stats}")
     return stats
