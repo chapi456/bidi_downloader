@@ -1,0 +1,64 @@
+# BiDi - config.yaml
+# Exemple complet avec commentaires
+
+general:
+  save_dir: /data/bidi/save        # Répertoire de sauvegarde des médias
+  db_path: /data/bidi/bidi.db      # Base de données SQLite
+  log_level: INFO
+
+server:
+  host: 0.0.0.0
+  port: 8000
+  poll_interval: 5                 # secondes entre 2 polls pipeline (UI)
+  cors_enabled: false
+  auth_enabled: false
+  auth_user: bidi
+  auth_password: ""
+
+imap:
+  server: imap.gmail.com
+  port: 993
+  use_ssl: true
+  user: mon.adresse@gmail.com
+  password: app_password_ici
+  folder: INBOX
+  max_emails: 50
+
+# Cookies Reddit au format Netscape (exporté via extension "cookies.txt")
+# Chemin relatif au dossier de config.yaml, ou chemin absolu.
+# Obtenir le fichier : dans Firefox/Chrome, installer l'extension "Get cookies.txt LOCALLY"
+# puis exporter les cookies de www.reddit.com → sauvegarder sous ce nom dans le même dossier.
+reddit:
+  cookies_path: www.reddit.com_cookies.txt
+
+jdownloader:
+  enabled: true
+  email: mon.jd@email.com
+  password: jd_password
+  device: MonPC
+  timeout: 600
+  max_parallel: 10
+  use_api: true
+
+gallery_dl:
+  enabled: true
+  max_parallel: 1
+  timeout: 180                     # Timeout download (step_send) en secondes
+
+yt_dlp:
+  enabled: true
+  max_parallel: 1
+  timeout: 300                     # Timeout download (step_send) — PAS utilisé pour step_meta
+
+llm:
+  enabled: false
+  host: http://localhost:11434
+  model: llama3.2:latest
+  auto_process: false
+
+# Mots-clés connus — ordre important : le 1er = dossier primaire de sauvegarde
+keywords:
+  known:
+    - motcle1
+    - motcle2
+    - motcle3

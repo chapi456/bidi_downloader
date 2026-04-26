@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="fr" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BiDi</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://api.fontshare.com/v2/css?f[]=satoshi@400,500,600,700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<!-- ══════════════════════════════════════
+     HEADER
+══════════════════════════════════════ -->
+<div id="header">
+  <a class="logo" href="#" onclick="setView('gallery');return false">
+    <svg width="20" height="20" viewBox="0 0 22 22" fill="none" aria-hidden="true">
+      <path d="M11 2L19.66 7V15L11 20L2.34 15V7L11 2Z" stroke="currentColor" stroke-width="1.6"/>
+      <circle cx="11" cy="11" r="3" fill="currentColor"/>
+    </svg>
+    BiDi
+  </a>
+
+  <div class="nav-tabs">
+    <button class="nav-tab active" id="tab-gallery"   onclick="setView('gallery')">Galerie</button>
+    <button class="nav-tab"        id="tab-pipeline"  onclick="setView('pipeline')">Pipeline</button>
+  </div>
+
+  <div class="search-wrap">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
+      <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+    </svg>
+    <input id="search-input" type="search" placeholder="Rechercher titre, plateforme, URL…"
+           oninput="debounceSearch()" autocomplete="off">
+  </div>
+
+  <div class="stats-bar">
+    <div class="stat-pill">emails&nbsp;<b id="st-emails">–</b></div>
+    <div class="stat-pill">médias&nbsp;<b id="st-files">–</b></div>
+    <div class="stat-pill">tasks&nbsp;<b id="st-tasks">–</b></div>
+  </div>
+
+  <button class="btn-icon" id="btn-refresh" onclick="refresh()" title="Actualiser" aria-label="Actualiser">
+    <svg id="refresh-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+      <polyline points="23 4 23 10 17 10"/>
+      <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+    </svg>
+  </button>
+  <button class="btn-icon" id="btn-sidebar" onclick="toggleSidebar()" title="Sidebar pipeline" aria-label="Afficher/masquer sidebar">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+      <rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/>
+    </svg>
+  </button>
+</div>
+
+<!-- ══════════════════════════════════════
+     BODY
+══════════════════════════════════════ -->
+<div class="app-body">
+
+  <!-- SIDEBAR -->
+  <nav id="sidebar" aria-label="Pipeline">
+    <div class="sidebar-section">
+      <div class="sidebar-label">Actions</div>
+      <button class="action-btn primary" onclick="runStep('all')">▶ Run All</button>
+      <button class="action-btn warn"    onclick="doResetFailed()">↺ Reset Failed</button>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Filtrer par step</div>
+      <button class="step-btn active" id="sb-all"           onclick="setFilter('')">
+        <span>tous</span><span class="step-n" id="n-all">–</span>
+      </button>
+      <button class="step-btn" id="sb-new"            onclick="setFilter('new')">
+        <span>new</span><span class="step-n" id="n-new">–</span>
+      </button>
+      <button class="step-btn" id="sb-parsed"         onclick="setFilter('parsed')">
+        <span>parsed</span><span class="step-n" id="n-parsed">–</span>
+      </button>
+      <button class="step-btn" id="sb-meta_done"      onclick="setFilter('meta_done')">
+        <span>meta_done</span><span class="step-n" id="n-meta_done">–</span>
+      </button>
+      <button class="step-btn" id="sb-download_sent"  onclick="setFilter('download_sent')">
+        <span>dl_sent</span><span class="step-n" id="n-download_sent">–</span>
+      </button>
+      <button class="step-btn" id="sb-download_done"  onclick="setFilter('download_done')">
+        <span>dl_done</span><span class="step-n" id="n-download_done">–</span>
+      </button>
+      <button class="step-btn" id="sb-thumb_done"     onclick="setFilter('thumb_done')">
+        <span>thumb_done</span><span class="step-n" id="n-thumb_done">–</span>
+      </button>
+      <button class="step-btn" id="sb-llm_done"       onclick="setFilter('llm_done')">
+        <span>llm_done</span><span class="step-n" id="n-llm_done">–</span>
+      </button>
+      <button class="step-btn" id="sb-done"           onclick="setFilter('done')">
+        <span>done</span><span class="step-n" id="n-done">–</span>
+      </button>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Run step</div>
+      <button class="action-btn" onclick="runStep('fetch')">fetch</button>
+      <button class="action-btn" onclick="runStep('parse')">parse</button>
+      <button class="action-btn" onclick="runStep('meta')">meta</button>
+      <button class="action-btn" onclick="runStep('send')">send</button>
+      <button class="action-btn" onclick="runStep('check')">check</button>
+      <button class="action-btn" onclick="runStep('thumb')">thumb</button>
+      <button class="action-btn" onclick="runStep('llm')">llm</button>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-label">Reset</div>
+      <button class="action-btn danger" onclick="promptResetStep(null)">↺ Reset step…</button>
+      <button class="action-btn danger" onclick="doResetFailed()">↺ Reset failed</button>
+    </div>
+  </nav>
+
+  <!-- CONTENU -->
+  <div id="content-area">
+
+    <!-- ── VUE GALERIE ── -->
+    <div id="view-gallery">
+      <!-- Toolbar -->
+      <div class="gallery-toolbar">
+        <div class="filter-chips" id="plat-filters">
+          <button class="chip active" data-plat="" onclick="setPlatform(this,'')">Tous</button>
+          <button class="chip" data-plat="youtube"  onclick="setPlatform(this,'youtube')">▶ YouTube</button>
+          <button class="chip" data-plat="reddit"   onclick="setPlatform(this,'reddit')">Reddit</button>
+          <button class="chip" data-plat="x.com"    onclick="setPlatform(this,'x.com')">X</button>
+          <button class="chip" data-plat="redgifs"  onclick="setPlatform(this,'redgifs')">Redgifs</button>
+          <button class="chip" data-plat="pornhub"  onclick="setPlatform(this,'pornhub')">PH</button>
+          <button class="chip" data-plat="xvideos"  onclick="setPlatform(this,'xvideos')">XVideos</button>
+        </div>
+        <div class="toolbar-right">
+          <span class="count-lbl" id="count-lbl"></span>
+          <select class="sort-select" id="sort-select" onchange="loadGallery(true)">
+            <option value="newest">Plus récents</option>
+            <option value="oldest">Plus anciens</option>
+            <option value="rating">Note ★</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Galerie -->
+      <div id="gallery-scroll">
+        <div id="gallery"></div>
+        <div id="load-more-wrap" class="load-more-wrap" style="display:none">
+          <button class="btn-load-more" onclick="loadMore()">Charger plus…</button>
+        </div>
+      </div>
+    </div><!-- /view-gallery -->
+
+    <!-- ── VUE PIPELINE ── -->
+    <div id="view-pipeline">
+      <div class="pipeline-grid">
+
+        <div class="pipeline-card">
+          <h3>État du pipeline</h3>
+          <div id="pipeline-viz"></div>
+        </div>
+
+        <div class="pipeline-card">
+          <h3>Run step</h3>
+          <button class="action-btn primary" style="width:100%" onclick="runStep('all')">▶ Run All Pipeline</button>
+          <div class="run-grid" id="run-grid">
+            <button class="rbtn" id="rbtn-fetch"   onclick="runStep('fetch')">fetch</button>
+            <button class="rbtn" id="rbtn-parse"   onclick="runStep('parse')">parse</button>
+            <button class="rbtn" id="rbtn-meta"    onclick="runStep('meta')">meta</button>
+            <button class="rbtn" id="rbtn-send"    onclick="runStep('send')">send</button>
+            <button class="rbtn" id="rbtn-check"   onclick="runStep('check')">check</button>
+            <button class="rbtn" id="rbtn-thumb"   onclick="runStep('thumb')">thumb</button>
+            <button class="rbtn" id="rbtn-llm"     onclick="runStep('llm')">llm</button>
+            <button class="rbtn" id="rbtn-reparse" onclick="runStep('reparse')">reparse</button>
+            <button class="rbtn" id="rbtn-remeta"  onclick="runStep('remeta')">remeta</button>
+          </div>
+        </div>
+
+        <div class="pipeline-card" style="grid-column:1/-1">
+          <h3>Logs temps réel</h3>
+          <div class="pipeline-log" id="pipeline-log">
+            <span class="l-info">⬡ BiDi en attente…</span>
+          </div>
+        </div>
+
+        <div class="pipeline-card" style="grid-column:1/-1">
+          <h3>Reset</h3>
+          <div style="display:flex;gap:var(--sp2);flex-wrap:wrap">
+            <button class="maction warn"   onclick="promptResetStep(null)">↺ Reset step…</button>
+            <button class="maction danger" onclick="doResetFailed()">↺ Reset all failed</button>
+          </div>
+        </div>
+
+      </div>
+    </div><!-- /view-pipeline -->
+
+  </div><!-- /content-area -->
+</div><!-- /app-body -->
+
+<!-- LOG BAR -->
+<div id="logbar" aria-live="polite" aria-label="Logs"></div>
+
+<!-- ══════════════════════════════════════
+     MODAL DÉTAIL
+══════════════════════════════════════ -->
+<div id="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+  <div class="modal-box">
+
+    <!-- Header modal -->
+    <div class="modal-header">
+      <button class="modal-back" onclick="closeModal()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
+          <path d="m15 18-6-6 6-6"/>
+        </svg>
+        Retour
+      </button>
+      <div class="modal-title" id="modal-title">–</div>
+      <button class="modal-close" onclick="closeModal()" aria-label="Fermer">✕</button>
+    </div>
+
+    <!-- Body modal -->
+    <div class="modal-body">
+
+      <!-- Colonne gauche -->
+      <div class="modal-left">
+        <div id="player-wrap" class="player-wrap"></div>
+
+        <div id="carousel-section" style="display:none">
+          <div class="carousel-header">
+            <span class="carousel-label" id="carousel-label">Médias</span>
+            <div class="carousel-nav">
+              <button onclick="shiftCarousel(-1)" aria-label="Précédent">‹</button>
+              <button onclick="shiftCarousel(1)"  aria-label="Suivant">›</button>
+            </div>
+          </div>
+          <div class="carousel-track" id="carousel-track"></div>
+        </div>
+
+        <div id="llm-section" style="display:none">
+          <div class="section-label">Résumé LLM</div>
+          <div class="llm-box" id="llm-box"></div>
+        </div>
+
+        <div id="files-section" style="display:none">
+          <div class="section-label">Fichiers</div>
+          <div class="file-list" id="file-list"></div>
+        </div>
+
+        <div class="modal-actions" id="modal-actions"></div>
+      </div>
+
+      <!-- Colonne droite -->
+      <div class="modal-right">
+        <div>
+          <div class="section-label">Informations</div>
+          <div class="info-grid" id="info-grid"></div>
+        </div>
+        <div class="h-div"></div>
+        <div id="kw-section" style="display:none">
+          <div class="section-label">Keywords</div>
+          <div class="kw-list" id="kw-list"></div>
+          <div class="h-div" style="margin-top:var(--sp3)"></div>
+        </div>
+        <div id="stars-section">
+          <div class="section-label">Note</div>
+          <div class="stars-edit" id="stars-edit" role="group" aria-label="Note"></div>
+        </div>
+        <div class="h-div"></div>
+        <div id="post-section" style="display:none">
+          <div class="section-label">Post</div>
+          <div class="post-box" id="post-box"></div>
+          <div class="h-div" style="margin-top:var(--sp3)"></div>
+        </div>
+        <div id="comments-section" style="display:none">
+          <div class="section-label">Commentaires</div>
+          <div class="comment-list" id="comment-list"></div>
+        </div>
+      </div>
+
+    </div><!-- /modal-body -->
+  </div><!-- /modal-box -->
+</div><!-- /modal -->
+
+<!-- ══════════════════════════════════════
+     JAVASCRIPT
+══════════════════════════════════════ -->
+<script src="/static/app.js" defer></script>
+</body>
+</html>
