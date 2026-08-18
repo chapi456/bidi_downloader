@@ -61,6 +61,7 @@ def _build_gdl_config(cookies_path: Optional[str] = None) -> dict:
                 "videos": True,
                 "previews": True,
                 "external": True,
+                "gallery": True,   # FIX: télécharge toutes les images d'une galerie Reddit
                 "comments": 0,
                 "recursion": 0,
             },
@@ -378,7 +379,11 @@ def run_task(db: BiDiDB, task: dict, email: dict, progress_cb=None) -> bool:
     url        = task["url"] 
     downloader = task.get("downloader") or "gallery-dl"
     platform   = email.get("platform") or _detect_platform(url)
-    _kw_raw = email.get("known_keywords") or []
+    
+    # FIX: recharger depuis DB — step_reparse peut avoir mis à jour les keywords
+    # entre la création de la task et son exécution en Popen
+    _fresh  = db.get_email(email_id)
+    _kw_raw = (_fresh or email).get("known_keywords") or []
     if isinstance(_kw_raw, str):
         try:
             import json as _json

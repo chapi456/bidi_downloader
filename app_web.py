@@ -2,20 +2,15 @@
 File: app_web.py
 Path: app_web.py
 
-Version: 3.3.0
-Date: 2026-04-24
+Version: 3.4.0
+Date: 2026-08-05
 
 Changelog:
-- 3.3.0 (2026-04-24): Fix _media_url() Windows : Path.relative_to() + as_posix()
-                       remplace le replace("\\","/") qui échouait selon le format
-                       du chemin en DB → thumbnails s'affichent en galerie.
-                       Ajout champ mediaitems dans _serialize_email() (attendu par app.js).
-                       Cohérence réponse API : ok/email au lieu de status/data.
-- 3.2.0 (2026-04-21): Fermeture forcée timeout=0.1s, signal SIGTERM/SIGINT.
-- 3.1.0 (2026-04-21): Lancement uvicorn depuis config host/port.
-- 3.0.0 (2026-04-21): Cohérence réponses API avec bidi_cli.
-- 2.0.0 (2026-04-20): Refonte email-centrique BiDiDB v7. Templates externes.
-- 1.0.0 (2026-03-15): Version initiale.
+- 3.4.0 (2026-08-05): FIX log /api/status supprimé via on_startup (le filtre
+  ajouté avant run() était écrasé par l'init interne uvicorn).
+  FIX list_emails sérialise maintenant les médias (_serialize_email) :
+  thumbnails et vidéos visibles dans la galerie web.
+- 3.3.0 (2026-04-26): ...
 """
 
 from __future__ import annotations
@@ -42,11 +37,11 @@ from database import BiDiDB
 from api_steps import router as steps_router
 
 logger = logging.getLogger(__name__)
-VERSION = "3.3.0"
+VERSION = "3.4.0"
 
-cfg     = get_config()
-db      = BiDiDB(cfg.get_db_path())
-app     = FastAPI(title="BiDi Media Manager", version=VERSION)
+cfg = get_config()
+db  = BiDiDB(cfg.get_db_path())
+app = FastAPI(title="BiDi Media Manager", version=VERSION)
 
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
 app.mount("/static", StaticFiles(directory=str(ROOT / "templates" / "static")), name="static")
@@ -75,11 +70,7 @@ def _file_type(filepath: str) -> str:
 
 
 def _media_url(filepath: str) -> str:
-    """
-    Construit l'URL /media/<rel> à partir d'un filepath DB.
-    Utilise Path.relative_to() + as_posix() pour être robuste
-    sur Windows (backslashes) et Linux.
-    """
+    """Construit l'URL /media/<rel> à partir d'un filepath DB."""
     fp = Path(filepath)
     if fp.is_absolute():
         try:
@@ -88,36 +79,48 @@ def _media_url(filepath: str) -> str:
             rel = fp
     else:
         rel = fp
-    # as_posix() → forward-slashes même sous Windows
     return "/media/" + rel.as_posix().lstrip("/")
 
 
 def _serialize_email(email: dict) -> dict:
-    """Enrichit un email avec media_items, download_tasks, media_count."""
+    """Enrichit un email avec media_items et download_tasks."""
     files = db.get_media_files(email["id"])
     tasks = db.get_download_tasks(email["id"])
 
     media_items = []
     for f in files:
-        ft = f.get("file_type") or _file_type(f.get("filepath", "") or f.get("file_path", ""))
         fp = f.get("filepath") or f.get("file_path", "")
+        ft = f.get("file_type") or _file_type(fp)
         media_items.append({
             "id":         f["id"],
             "url":        _media_url(fp),
             "file_type":  ft,
-            "filetype":   ft,
+            "filetype":   ft,        # alias app.js
             "file_path":  fp,
-            "file_size":  f.get("filesize") or f.get("file_size"),
             "filesize":   f.get("filesize") or f.get("file_size"),
             "is_primary": bool(f.get("is_primary")),
         })
 
-    email["media_items"]     = media_items
-    email["mediaitems"]      = media_items   # alias app.js v3
-    email["media_files"]     = media_items   # alias attendu par buildCard() / renderModal()
-    email["media_count"]     = len(media_items)
-    email["download_tasks"]  = tasks
+    email["media_items"]    = media_items
+    email["mediaitems"]     = media_items   # alias app.js v3
+    email["media_files"]    = media_items   # alias buildCard()/renderModal()
+    email["media_count"]    = len(media_items)
+    email["download_tasks"] = tasks
     return email
+
+
+# ── FIX log /api/status : filtre appliqué après init uvicorn via on_startup ──
+
+class _SuppressStatusOK(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return not ('"GET /api/status' in msg and '" 200 ' in msg)
+
+
+@app.on_event("startup")
+async def _apply_log_filter() -> None:
+    """Appliqué APRÈS que uvicorn a (re)configuré ses loggers → filtre persiste."""
+    logging.getLogger("uvicorn.access").addFilter(_SuppressStatusOK())
 
 
 # ── API emails ────────────────────────────────────────────────────────────────
@@ -135,12 +138,14 @@ async def list_emails(
             q = search.strip().lower()
             emails = [
                 e for e in emails
-                if q in (e.get("subject")  or "").lower()
+                if q in (e.get("subject")    or "").lower()
                 or q in (e.get("source_url") or "").lower()
-                or q in (e.get("title")    or "").lower()
-                or q in (e.get("platform") or "").lower()
+                or q in (e.get("title")      or "").lower()
+                or q in (e.get("platform")   or "").lower()
             ]
         emails = emails[:limit]
+        # FIX : sérialiser les médias pour thumbnails/vidéos dans la galerie
+        emails = [_serialize_email(e) for e in emails]
         return {"ok": True, "emails": emails, "count": len(emails), "offset": offset}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -220,31 +225,15 @@ if __name__ == "__main__":
     print(f" BiDi Media Manager v{VERSION}")
     print(f" Interface : http://{display_host}:{port}")
     print(f" API docs  : http://{display_host}:{port}/docs")
-    print(f" Config    : {cfg.path or 'defaults'}")
     print("=" * 60)
 
     def _force_exit(signum, frame):
-        print("bidi: Arrêt forcé (signal reçu).")
+        print("bidi: Arrêt forcé.")
         os._exit(0)
 
     signal.signal(signal.SIGTERM, _force_exit)
     signal.signal(signal.SIGINT,  _force_exit)
 
-    import logging
-
-    class _SuppressStatusOK(logging.Filter):
-        def filter(self, record: logging.LogRecord) -> bool:
-            msg = record.getMessage()
-            return not ('"GET /api/status' in msg and '" 200 ' in msg)
-
-    # Appliquer le filtre AVANT uvicorn.run() ET via log_config
-    logging.getLogger("uvicorn.access").addFilter(_SuppressStatusOK())
-
     uvicorn.run(app, host=host, port=port, log_level="info",
-                timeout_graceful_shutdown=1,
-                access_log=True)
-
-    # Re-appliquer après run (au cas où uvicorn réinitialise le logger)
-    logging.getLogger("uvicorn.access").addFilter(_SuppressStatusOK())
-    
+                timeout_graceful_shutdown=1)
     os._exit(0)

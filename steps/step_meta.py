@@ -206,17 +206,31 @@ def _extract_reddit_meta(items: list[dict]) -> dict:
         if subcategory in ("submission", "post") or ("title" in item and submission is None):
             submission = item
             # Chercher thumbnail : champ direct d'abord
-            for key in ("thumbnail", "url"):
-                val = item.get(key)
-                if val and isinstance(val, str) and val.startswith("http"):
-                    thumbnail_url = val
-                    break
-            # Puis dans preview.images[0].source.url (format API Reddit)
+                        # Reddit retourne parfois "self", "default", "nsfw" dans "thumbnail"
+            _SKIP = {"self", "default", "nsfw", "image", "spoiler", ""}
+            _thumb_raw = item.get("thumbnail") or ""
+            if (isinstance(_thumb_raw, str)
+                    and _thumb_raw.startswith("http")
+                    and _thumb_raw not in _SKIP):
+                thumbnail_url = _thumb_raw
+
+            # preview.images[0].source.url (format API Reddit)
             if not thumbnail_url:
                 try:
                     preview = item.get("preview") or {}
                     if isinstance(preview, dict):
                         src = preview["images"][0]["source"]["url"]
+                        if src and src.startswith("http"):
+                            thumbnail_url = src.replace("&amp;", "&")
+                except (KeyError, IndexError, TypeError):
+                    pass
+
+            # Fallback : dernière résolution disponible
+            if not thumbnail_url:
+                try:
+                    resolutions = item.get("preview", {})["images"][0]["resolutions"]
+                    if resolutions:
+                        src = resolutions[-1]["url"]
                         if src and src.startswith("http"):
                             thumbnail_url = src.replace("&amp;", "&")
                 except (KeyError, IndexError, TypeError):
