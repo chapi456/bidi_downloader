@@ -111,42 +111,60 @@ def _serialize_email(email: dict) -> dict:
 
 # ── FIX log /api/status : filtre appliqué après init uvicorn via on_startup ──
 
-class _SuppressStatusOK(logging.Filter):
+class _SuppressPollingOK(logging.Filter):
+    """
+    Masque les requêtes GET de polling silencieux (CLI + interface web)
+    qui n'apportent aucune information utile au suivi du pipeline.
+    Les POST (actions) et les GET en erreur restent toujours visibles.
+    """
+    _SILENT_GET_PREFIXES = (
+        '"GET /api/status',
+        '"GET /api/emails',
+        '"GET /api/stats',
+        '"GET /static/',
+        '"GET / HTTP',
+    )
+
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
-        return not ('"GET /api/status' in msg and '" 200 ' in msg)
-
+        if '" 200 ' not in msg and '" 304 ' not in msg:
+            return True  # erreurs/autres codes toujours visibles
+        return not any(p in msg for p in self._SILENT_GET_PREFIXES)
 
 @app.on_event("startup")
 async def _apply_log_filter() -> None:
     """Appliqué APRÈS que uvicorn a (re)configuré ses loggers → filtre persiste."""
-    logging.getLogger("uvicorn.access").addFilter(_SuppressStatusOK())
+    logging.getLogger("uvicorn.access").addFilter(_SuppressPollingOK())
 
 
 # ── API emails ────────────────────────────────────────────────────────────────
 
 @app.get("/api/emails")
 async def list_emails(
-    step:   Optional[str] = Query(None),
-    limit:  int           = Query(50, ge=1, le=500),
-    offset: int           = Query(0, ge=0),
-    search: Optional[str] = Query(None),
+    step:     Optional[str] = Query(None),
+    platform: Optional[str] = Query(None),
+    limit:    int           = Query(50, ge=1, le=500),
+    offset:   int           = Query(0, ge=0),
+    search:   Optional[str] = Query(None),
 ):
     try:
-        emails = db.list_emails(step=step, limit=200, offset=offset)
-        if search:
-            q = search.strip().lower()
-            emails = [
-                e for e in emails
-                if q in (e.get("subject")    or "").lower()
-                or q in (e.get("source_url") or "").lower()
-                or q in (e.get("title")      or "").lower()
-                or q in (e.get("platform")   or "").lower()
-            ]
-        emails = emails[:limit]
-        # FIX : sérialiser les médias pour thumbnails/vidéos dans la galerie
+        # FIX : filtre platform + search en SQL (via db.list_emails).
+        # On demande limit+1 lignes pour savoir s'il reste une page suivante
+        # sans dépendre de count==limit (cassé si un filtre réduit le résultat).
+        rows = db.list_emails(
+            step=step, limit=limit + 1, offset=offset,
+            platform=platform, search=search,
+        )
+        has_more = len(rows) > limit
+        emails = rows[:limit]
         emails = [_serialize_email(e) for e in emails]
-        return {"ok": True, "emails": emails, "count": len(emails), "offset": offset}
+        return {
+            "ok": True,
+            "emails": emails,
+            "count": len(emails),
+            "has_more": has_more,
+            "offset": offset,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

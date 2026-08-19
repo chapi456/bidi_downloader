@@ -280,6 +280,18 @@ class BiDiDB:
             )
             return cur.lastrowid if cur.rowcount else None
 
+    def delete_email(self, email_id: int) -> bool:
+        """
+        Supprime un email et toutes ses données associées en DB
+        (download_tasks, media_files — via ON DELETE CASCADE sur les FK).
+        Ne supprime PAS les fichiers physiques sur disque — c'est à l'appelant
+        de le faire si nécessaire avant/après cet appel.
+        Retourne True si une ligne a été supprimée, False si email_id introuvable.
+        """
+        with self._conn() as conn:
+            cur = conn.execute("DELETE FROM emails WHERE id = ?", (email_id,))
+            return cur.rowcount > 0
+
     # ── Emails : lecture ───────────────────────────────────────────────────
 
     def get_email(self, email_id: int) -> Optional[dict]:
@@ -318,12 +330,34 @@ class BiDiDB:
         step: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
+        platform: Optional[str] = None,
+        search: Optional[str] = None,
     ) -> list:
+        """
+        FIX: filtre platform + search appliqués en SQL, avant pagination.
+        Auparavant filtrés en mémoire côté API après la pagination → le nombre
+        de résultats utiles tombait sous `limit` et le "charger plus" côté
+        front croyait avoir atteint la fin alors qu'il restait des résultats
+        plus loin dans la table (bug de pagination sur filtre fournisseur).
+        """
         sql = "SELECT * FROM emails"
+        where: list = []
         params: list = []
         if step:
-            sql += " WHERE step = ?"
+            where.append("step = ?")
             params.append(step)
+        if platform:
+            where.append("LOWER(platform) LIKE ?")
+            params.append(f"%{platform.lower()}%")
+        if search:
+            where.append(
+                "(LOWER(subject) LIKE ? OR LOWER(source_url) LIKE ? "
+                "OR LOWER(title) LIKE ? OR LOWER(platform) LIKE ?)"
+            )
+            q = f"%{search.lower()}%"
+            params += [q, q, q, q]
+        if where:
+            sql += " WHERE " + " AND ".join(where)
         sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
         params += [limit, offset]
         with self._conn() as conn:
@@ -583,6 +617,23 @@ class BiDiDB:
         """Supprime une entrée media_file par son id (ex: nettoyage stale thumb)."""
         with self._conn() as conn:
             conn.execute("DELETE FROM media_files WHERE id = ?", (media_id,))
+
+    def clear_email_downloads(self, email_id: int) -> int:
+        """
+        Supprime les download_tasks et media_files d'un email (mais pas l'email
+        lui-même). Utilisé lors d'un reset_step vers un step antérieur à 'send',
+        pour éviter les doublons/fichiers fantômes au prochain passage du pipeline.
+        Ne touche pas aux fichiers physiques sur disque.
+        """
+        with self._conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM media_files WHERE email_id = ?", (email_id,)
+            )
+            n = cur.rowcount
+            conn.execute(
+                "DELETE FROM download_tasks WHERE email_id = ?", (email_id,)
+            )
+            return n
 
     def get_media_files(self, email_id: int) -> list:
         with self._conn() as conn:

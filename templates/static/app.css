@@ -549,3 +549,11 @@ a,button,[role=button],input,select {
     transition-duration:.01ms !important;
   }
 }
+
+.tasks-progress { margin-top: var(--space-4, 1rem); }
+.tp-header { font-size: .8rem; opacity: .7; margin-bottom: .4rem; }
+.tp-row { display: flex; align-items: center; gap: .5rem; margin-bottom: .3rem; }
+.tp-label { flex: 0 0 240px; font-size: .75rem; font-family: monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tp-bar { flex: 1; height: 6px; background: rgba(255,255,255,.08); border-radius: 3px; overflow: hidden; }
+.tp-fill { height: 100%; background: var(--warn, #4f98a3); transition: width .3s ease; }
+.tp-pct { flex: 0 0 36px; text-align: right; font-size: .75rem; font-variant-numeric: tabular-nums; }

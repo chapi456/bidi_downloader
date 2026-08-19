@@ -47,6 +47,30 @@ _STEP_MODULE: dict[str, str] = {
     "remeta":  "steps.step_meta",   # alias : remeta relance step_meta
 }
 
+# FIX : PIPELINE utilise des noms d'actions CLI (fetch/parse/meta/...) mais la
+# state machine DB (database.py STEPS) utilise des noms d'états différents.
+# reset_step() confondait les deux, causant systématiquement une ValueError
+# ("Step inconnu : 'fetch'") dès qu'on tentait un reset avec email_id.
+_STEP_INPUT_STATE: dict[str, str] = {
+    # État DB requis en entrée de chaque step CLI (= où le reset doit ramener)
+    "fetch": "new",
+    "parse": "new",
+    "meta": "parsed",
+    "send": "meta_done",
+    "check": "download_sent",
+    "thumb": "download_done",
+    "llm": "thumb_done",
+}
+_STEP_OUTPUT_STATE: dict[str, str] = {
+    # État DB produit en sortie de chaque step CLI (= où chercher les emails
+    # "actuellement à ce step" pour un reset en masse sans email_id)
+    "parse": "parsed",
+    "meta": "meta_done",
+    "send": "download_sent",
+    "check": "download_done",
+    "thumb": "thumb_done",
+    "llm": "llm_done",
+}
 
 def _load_run(step: str):
     """Importe le module du step et retourne sa fonction run()."""
@@ -176,30 +200,44 @@ def run_all() -> dict:
 
 
 def reset_step(step: str, *, email_id: Optional[int] = None,
-               run_after: bool = False) -> dict:
+                run_after: bool = False) -> dict:
     """
-    Remet les emails du step donné à l'état précédent (ok → step-1).
+    Remet les emails du step donné à l'état DB précédent (état d'entrée du step).
     Si email_id fourni, ne remet que cet email.
     """
     if step not in PIPELINE:
         raise ValueError(f"Step inconnu : {step!r}")
 
     cfg = get_config()
-    db  = BiDiDB(cfg.get_db_path())
+    db = BiDiDB(cfg.get_db_path())
 
-    prev_step = PIPELINE[PIPELINE.index(step) - 1] if PIPELINE.index(step) > 0 else step
-    target    = prev_step if step != "fetch" else "new"
+    target = _STEP_INPUT_STATE.get(step)
+    if target is None:
+        raise ValueError(f"Reset non supporté pour le step {step!r}")
 
     if email_id:
         emails = [db.get_email(email_id)]
         if not emails[0]:
             raise ValueError(f"Email #{email_id} introuvable")
     else:
-        emails = db.get_emails_by_step(step, step_status=None)
+        # FIX : recherche par état DB de sortie du step, pas par nom CLI
+        # (get_emails_by_step("parse", ...) ne matchait jamais rien avant).
+        output_state = _STEP_OUTPUT_STATE.get(step)
+        if output_state is None:
+            raise ValueError(
+                f"Reset en masse non supporté pour le step {step!r} "
+                f"(fournir email_id pour un reset ciblé)"
+            )
+        emails = db.get_emails_by_step(output_state, step_status=None)
 
+    # FIX : nettoyer download_tasks/media_files si on repasse avant 'meta_done'
+    # (sinon doublons de tâches et fichiers fantômes au prochain passage).
+    _CLEANUP_TARGETS = {"new", "parsed"}
     count = 0
     for e in emails:
         if e:
+            if target in _CLEANUP_TARGETS:
+                db.clear_email_downloads(e["id"])
             db.advance_step(e["id"], target)
             count += 1
 

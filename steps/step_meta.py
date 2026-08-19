@@ -57,6 +57,9 @@ PLATFORM_MAP = {
 
 KNOWN_UNSUPPORTED = [
     "Unsupported URL", "Unable to extract", "No video formats found",
+    # FIX : message renvoyé par yt-dlp pour les tweets X/Twitter contenant
+    # uniquement des images (pas de vidéo) — cas normal, pas une vraie erreur.
+    "No video could be found",
 ]
 
 # FIX : pattern de détection URL subreddit racine (sans /comments/)
@@ -80,13 +83,23 @@ def _is_reddit_url(url: str) -> bool:
     u = url.lower()
     return "reddit.com" in u or "redd.it" in u
 
+def _is_twitter_url(url: str) -> bool:
+    u = url.lower()
+    return "twitter.com" in u or "x.com" in u
 
 # ── yt-dlp ────────────────────────────────────────────────────────────────────
 
-def run_ytdlp(url: str, timeout: int = 60) -> dict:
+def run_ytdlp(url: str, timeout: int = 60,
+               cookies_path: str | None = None) -> dict:
     """Lance yt-dlp --dump-json. Retourne le dict ou lève une exception."""
     cmd = [sys.executable, "-m", "yt_dlp",
-           "--dump-json", "--no-playlist", "--quiet", "--no-warnings", url]
+           "--dump-json", "--no-playlist", "--quiet", "--no-warnings"]
+    if cookies_path and Path(cookies_path).exists():
+        cmd += ["--cookies", cookies_path]
+        logger.info(f"meta yt-dlp cookies: {cookies_path}")
+    else:
+        logger.warning(f"meta yt-dlp: pas de cookies ({cookies_path!r})")
+    cmd.append(url)
     result = subprocess.run(
         cmd, capture_output=True, text=True,
         timeout=timeout, encoding="utf-8", errors="replace",
@@ -96,7 +109,21 @@ def run_ytdlp(url: str, timeout: int = 60) -> dict:
         if _is_unsupported_url_error(stderr):
             raise ValueError(f"URL non supportée par yt-dlp: {stderr[:200]}")
         raise RuntimeError(f"yt-dlp exit {result.returncode}: {stderr[:500]}")
-    return json.loads(result.stdout)
+
+    # FIX : posts image-only (ex. X/Twitter multi-photos, pas de vidéo) →
+    # yt-dlp sort souvent stdout vide ou "null" en exit 0. json.loads("null")
+    # renvoie None, et extract_meta(None) plantait en AttributeError.
+    # On traite ce cas comme "pas de métadonnées vidéo" plutôt qu'un crash.
+    raw_out = result.stdout.strip()
+    if not raw_out:
+        raise ValueError("yt-dlp: sortie vide (probablement un post image seule, sans vidéo)")
+    try:
+        data = json.loads(raw_out)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"yt-dlp: JSON invalide ({e})")
+    if not isinstance(data, dict):
+        raise ValueError(f"yt-dlp: résultat inattendu (type={type(data).__name__}, probablement image seule)")
+    return data
 
 
 def extract_meta(raw: dict) -> dict:
@@ -455,13 +482,20 @@ def run(db: BiDiDB, cfg, *, yt_dlp_timeout: int = 60,
                     post_comments = api_content.get("post_comments") or []
 
             else:
+                # FIX : cookies X/Twitter injectés pour tweets sensibles/adultes
+                # (sans session, yt-dlp ne voit aucun média → "No video could be found")
+                yt_cookies = None
+                if _is_twitter_url(source_url):
+                    yt_cookies = cfg.get_twitter_cookies_path()
                 logger.info(
                     f"meta {i}/{len(emails)}: email={email_id} "
                     f"yt-dlp → {source_url[:80]}"
                 )
                 try:
-                    raw = run_ytdlp(source_url, timeout=yt_dlp_timeout)
+                    raw = run_ytdlp(source_url, timeout=yt_dlp_timeout,
+                                     cookies_path=yt_cookies)
                     meta = extract_meta(raw)
+                    
                     logger.info(f"meta {i}: ok title={meta.get('title')!r}")
                 except ValueError as exc:
                     logger.info(f"meta {i}: URL non supportée, fallback step_send: {exc}")

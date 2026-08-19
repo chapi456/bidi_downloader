@@ -525,7 +525,7 @@ function renderPlayer(e, mediaFiles, idx){
   }
   const f = mediaFiles[idx] || mediaFiles[0];
   if(f.file_type === 'video' && f.url){
-    wrap.innerHTML = `<video controls preload="metadata" style="width:100%;max-height:400px;display:block;background:#000">
+    wrap.innerHTML = `<video controls autoplay muted playsinline preload="metadata" style="width:100%;max-height:400px;display:block;background:#000">
       <source src="${esc(f.url)}">
       Votre navigateur ne supporte pas la lecture vidéo.
     </video>`;
@@ -567,30 +567,50 @@ function shiftCarousel(dir){
 }
 
 // ── SSE ───────────────────────────────────────────────────────────────────────
-function connectSSE(){
+function connectSSE() {
   const es = new EventSource('/api/status/stream');
-  es.onmessage = ev => {
-    try{
+  es.onmessage = (ev) => {
+    try {
       const p = JSON.parse(ev.data);
-      (p.logs||[]).forEach(l => {
+      p.logs.forEach(l => {
         const cls = /ERREUR|Exception|error/i.test(l) ? 'l-err'
-                  : /Terminé|OK|✓/i.test(l)           ? 'l-ok'
-                  : /warning|attention/i.test(l)       ? 'l-warn'
-                  : 'l-info';
+                  : /Terminé|OK/i.test(l) ? 'l-ok'
+                  : /warning|attention/i.test(l) ? 'l-warn' : 'l-info';
         log(l, cls);
       });
-      (p.running||[]).forEach(s => {
-        const btn = $('rbtn-'+s);
-        if(btn) btn.classList.add('running');
+      p.running.forEach(s => {
+        const btn = id(`rbtn-${s}`);
+        if (btn) btn.classList.add('running');
       });
       STEPS_CLI.forEach(s => {
-        if(!(p.running||[]).includes(s)){
-          $('rbtn-'+s)?.classList.remove('running');
-        }
+        if (!p.running.includes(s)) id(`rbtn-${s}`)?.classList.remove('running');
       });
-    } catch(_){}
+      // FIX : affichage de la progression détaillée des téléchargements actifs
+      renderTasksProgress(p.tasks_progress || []);
+    } catch {}
   };
   es.onerror = () => {};
+}
+
+function renderTasksProgress(tasks) {
+  const wrap = id('tasks-progress');
+  if (!wrap) return;
+  if (!tasks.length) {
+    wrap.innerHTML = '';
+    wrap.style.display = 'none';
+    return;
+  }
+  wrap.style.display = 'block';
+  const avgPct = Math.round(tasks.reduce((a, t) => a + (t.pct || 0), 0) / tasks.length);
+  wrap.innerHTML = `
+    <div class="tp-header">Téléchargements en cours (${tasks.length}) — moyenne ${avgPct}%</div>
+    ${tasks.map(t => `
+      <div class="tp-row">
+        <span class="tp-label">task#${t.task_id} email#${t.email_id} · ${esc(t.downloader || '?')}</span>
+        <div class="tp-bar"><div class="tp-fill" style="width:${t.pct || 0}%"></div></div>
+        <span class="tp-pct">${t.pct || 0}%</span>
+      </div>`).join('')}
+  `;
 }
 
 // ── Refresh ───────────────────────────────────────────────────────────────────

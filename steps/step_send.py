@@ -70,7 +70,7 @@ def _output_dir_for(email: dict) -> str:
 
 
 def _reap(procs: list) -> list:
-    return [p for p in procs if p.poll() is None]
+    return [item for item in procs if item[0].poll() is None]
 
 
 def _wait_for_slot(procs: list, max_par: int, poll_interval: float = 0.5) -> list:
@@ -217,10 +217,10 @@ def run(db: BiDiDB, cfg, on_progress=None) -> dict:
                 close_fds=True,
             )
             log_fh.close()
-            pools[downloader].append(proc)
+            pools[downloader].append((proc, task_id, task_log))  # FIX : garder task_log pour diagnostic
             logger.info(
                 f"task={task_id} email={email_id} "
-                f"→ {downloader} dir={output_dir} [pid={proc.pid}]"
+                f"→ {downloader} dir={output_dir} url={url[:90]} [pid={proc.pid}]"
             )
             stats["launched"] += 1
             stats["tasks_sent"] += 1
@@ -239,14 +239,29 @@ def run(db: BiDiDB, cfg, on_progress=None) -> dict:
     logger.info("Attente fin des téléchargements...")
     for dl_name, pool in pools.items():
         wait_sec = _wait_timeouts.get(dl_name, 600)
-        for proc in pool:
+        for proc, tid, task_log in pool:
             try:
                 proc.wait(timeout=wait_sec)
                 if proc.returncode not in (0, None):
-                    logger.warning(f"[{dl_name}] pid={proc.pid} retcode={proc.returncode}")
+                    logger.warning(f"[{dl_name}] task={tid} pid={proc.pid} retcode={proc.returncode}")
+                    # FIX : remonter le vrai message d'erreur dans le log principal
+                    # au lieu de forcer à aller ouvrir _logs/task_N.log manuellement.
+                    try:
+                        tail = task_log.read_text(encoding="utf-8", errors="replace").strip()
+                        tail_lines = "\n".join(tail.splitlines()[-15:])
+                        logger.warning(f"[{dl_name}] task={tid} détail échec :\n{tail_lines}")
+                        # FIX : remonter la dernière ligne utile aux clients (web/CLI) via SSE
+                        last_line = next((l for l in reversed(tail.splitlines()) if l.strip()), "?")
+                        if on_progress:
+                            try:
+                                on_progress(f"task={tid} échec : {last_line[:120]}")
+                            except TypeError:
+                                on_progress()  # compat callback sans argument
+                    except Exception as e:
+                        logger.warning(f"[{dl_name}] task={tid} impossible de lire {task_log}: {e}")
             except subprocess.TimeoutExpired:
                 proc.kill()
-                logger.warning(f"[{dl_name}] pid={proc.pid} killed (timeout {wait_sec}s)")
+                logger.warning(f"[{dl_name}] task={tid} pid={proc.pid} killed (timeout {wait_sec}s)")
 
     logger.info(f"step_send terminé — {stats}")
     return stats

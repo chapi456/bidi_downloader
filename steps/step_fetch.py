@@ -178,6 +178,46 @@ def _fetch_message(conn: imaplib.IMAP4, uid: bytes) -> Optional[email.message.Me
     logger.debug(f"[fetch] RFC822 brut : {len(raw)}B — aperçu: {raw[:200]!r}")
     return email.message_from_bytes(raw)
 
+def _fetch_messages_batch(conn: imaplib.IMAP4, ids: list[bytes]) -> dict:
+    """
+    FIX perf : récupère tous les messages en UN SEUL FETCH au lieu d'un
+    aller-retour IMAP par email. Réduit drastiquement la latence sur Gmail
+    (chaque round-trip coûte ~100-300ms, cumulés sur N emails).
+    Retourne {uid: Message}. En cas de réponse groupée mal formée (serveur
+    non standard), bascule automatiquement en mode séquentiel (fiable).
+    """
+    if not ids:
+        return {}
+
+    msg_set = b",".join(ids)
+    try:
+        status, data = conn.fetch(msg_set, "(RFC822)")
+    except Exception as e:
+        logger.warning(f"[fetch] batch FETCH échoué ({e}) → fallback séquentiel")
+        return {uid: _fetch_message(conn, uid) for uid in ids}
+
+    if status != "OK" or not data:
+        logger.warning("[fetch] batch FETCH vide/KO → fallback séquentiel")
+        return {uid: _fetch_message(conn, uid) for uid in ids}
+
+    # imaplib renvoie un littéral (bytes) par message, dans l'ordre demandé.
+    literals = [d for d in data if isinstance(d, bytes) and len(d) > 20]
+    if len(literals) != len(ids):
+        logger.warning(
+            f"[fetch] batch FETCH : {len(literals)} littéraux pour {len(ids)} "
+            f"messages attendus → fallback séquentiel (serveur non standard)"
+        )
+        return {uid: _fetch_message(conn, uid) for uid in ids}
+
+    result = {}
+    for uid, raw in zip(ids, literals):
+        try:
+            result[uid] = email.message_from_bytes(raw)
+        except Exception as e:
+            logger.error(f"[fetch] parsing message uid={uid} échoué: {e}")
+            result[uid] = None
+    logger.info(f"[fetch] batch FETCH : {len(result)} message(s) en 1 requête IMAP")
+    return result
 
 def count(db, cfg) -> int:
     n = cfg.get_imap_max()
@@ -206,10 +246,14 @@ def run(db, cfg, *, mark_as_read: bool = True, on_progress=None) -> dict:
         ids = _fetch_ids(conn, folder, max_emails)
         logger.info(f"[fetch] {len(ids)} messages non lus trouvés")
 
+        # FIX perf : un seul FETCH pour tous les messages (au lieu de N)
+        messages = _fetch_messages_batch(conn, ids)
+        seen_uids: list[bytes] = []  # FIX : marquage lu groupé en fin de boucle
+
         for uid in ids:
             stats["fetched"] += 1
             try:
-                msg = _fetch_message(conn, uid)
+                msg = messages.get(uid)
                 if not msg:
                     stats["failed"] += 1
                     continue
@@ -218,25 +262,22 @@ def run(db, cfg, *, mark_as_read: bool = True, on_progress=None) -> dict:
                 if not message_id:
                     import hashlib
                     raw_id = f"{msg.get('Date','')}{msg.get('From','')}{msg.get('Subject','')}"
-                    message_id = f"<generated-{hashlib.sha1(raw_id.encode()).hexdigest()[:16]}>"
+                    message_id = f"<{hashlib.sha1(raw_id.encode()).hexdigest()}@bidi>"
 
-                subject     = _decode_header(msg.get("Subject"))
-                sender      = _decode_header(msg.get("From"))
+                subject = _decode_header(msg.get("Subject"))
+                sender = _decode_header(msg.get("From"))
                 received_at = _parse_date(msg.get("Date"))
-                body_text   = _extract_body(msg, subject)
+                body_text = _extract_body(msg, subject)
 
                 email_id = db.add_email(
-                    message_id=message_id,
-                    subject=subject,
-                    sender=sender,
-                    received_at=received_at,
-                    body_text=body_text,
+                    message_id=message_id, subject=subject, sender=sender,
+                    received_at=received_at, body_text=body_text,
                 )
                 if email_id is not None:
                     stats["new"] += 1
                     logger.info(f"[fetch] #{email_id} nouveau : {subject[:60]!r}")
                     if mark_as_read:
-                        conn.store(uid, "+FLAGS", "\\Seen")
+                        seen_uids.append(uid)
                 else:
                     stats["duplicate"] += 1
                     logger.debug(f"[fetch] Doublon ignoré : {message_id}")
@@ -246,6 +287,19 @@ def run(db, cfg, *, mark_as_read: bool = True, on_progress=None) -> dict:
                 logger.error(f"[fetch] Erreur sur message {uid}: {e}", exc_info=True)
             if on_progress:
                 on_progress()
+
+        # FIX perf : un seul STORE groupé au lieu d'un par email
+        if seen_uids:
+            try:
+                conn.store(b",".join(seen_uids), "+FLAGS", "\\Seen")
+                logger.info(f"[fetch] {len(seen_uids)} message(s) marqué(s) lu en 1 requête")
+            except Exception as e:
+                logger.warning(f"[fetch] marquage lu groupé échoué ({e}) → fallback séquentiel")
+                for uid in seen_uids:
+                    try:
+                        conn.store(uid, "+FLAGS", "\\Seen")
+                    except Exception:
+                        pass
 
     finally:
         try:

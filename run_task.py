@@ -119,6 +119,15 @@ def _detect_platform(url: str) -> str:
         return "twitter"
     return "misc"
 
+def _cookies_for_platform(cfg, platform: str) -> Optional[str]:
+    """FIX : sélectionne le fichier de cookies selon la plateforme —
+    gallery-dl a besoin de session pour Reddit ET Twitter/X (contenu sensible)."""
+    p = (platform or "").lower()
+    if "reddit" in p:
+        return cfg.get_reddit_cookies_path()
+    if "twitter" in p or "x.com" in p or p == "x":
+        return cfg.get_twitter_cookies_path()
+    return None
 
 # ── Répertoire cible ──────────────────────────────────────────────────────────
 
@@ -427,7 +436,7 @@ def run_task(db: BiDiDB, task: dict, email: dict, progress_cb=None) -> bool:
     raw_files: list[Path] = []
 
     if downloader == "gallery-dl":
-        cookies = cfg.get_reddit_cookies_path() if "reddit" in platform else None
+        cookies = _cookies_for_platform(cfg, platform)
         cfg_path = _write_gdl_config(task_id, cookies)
         raw_files = _run_gallery_dl(url, tmp_dir, cfg_path,
                                     timeout=cfg.get_gdl_timeout(),
@@ -444,11 +453,8 @@ def run_task(db: BiDiDB, task: dict, email: dict, progress_cb=None) -> bool:
                                progress_cb=progress_cb)
         if not raw_files:
             logger.info(f"[task={task_id}] yt-dlp vide → fallback gallery-dl")
-            cookies = cfg.get_reddit_cookies_path() if "reddit" in platform else None
+            cookies = _cookies_for_platform(cfg, platform)
             cfg_path = _write_gdl_config(task_id, cookies)
-            raw_files = _run_gallery_dl(url, tmp_dir, cfg_path,
-                                        timeout=cfg.get_gdl_timeout(),
-                                        cookies_path=cookies)
             cfg_path.unlink(missing_ok=True)
 
     elif downloader == "direct":

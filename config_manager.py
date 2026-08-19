@@ -348,6 +348,31 @@ class ConfigManager:
         logger.info(f"Config: cookies Reddit → {resolved}")
         return str(resolved)
 
+    def get_twitter_cookies_path(self) -> str | None:
+        """
+        Chemin vers le fichier de cookies X/Twitter (format Netscape).
+        Résolu relatif au dossier de config.yaml si chemin relatif fourni.
+        Retourne None si non configuré (yt-dlp tournera alors sans session,
+        et échouera sur les tweets sensibles/adultes).
+        """
+        raw = self.get("twitter", "cookies_path", default="") or ""
+        if not raw:
+            return None
+        p = Path(raw)
+        if p.is_absolute():
+            resolved = p
+        else:
+            # Relatif au dossier du fichier config
+            base = self.path.parent if self.path else Path.cwd()
+            resolved = (base / p).resolve()
+
+        if not resolved.exists():
+            logger.warning(f"Config: cookies Twitter introuvable : {resolved}")
+            return None
+
+        logger.info(f"Config: cookies Twitter → {resolved}")
+        return str(resolved)
+
     # Alias rétrocompatibilité (ancienne API)
     def get_reddit_cookies(self) -> Optional[str]:
         return self.get_reddit_cookies_path()

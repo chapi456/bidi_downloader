@@ -31,6 +31,12 @@ imap:
 reddit:
   cookies_path: www.reddit.com_cookies.txt
 
+# Cookies X/Twitter (format Netscape). Nécessaire pour les tweets marqués
+# sensibles/adultes : sans session connectée, yt-dlp ne voit aucun média.
+# Exporter les cookies de x.com (connecté) avec "Get cookies.txt LOCALLY".
+twitter:
+  cookies_path: x.com_cookies.txt
+
 jdownloader:
   enabled: true
   email: mon.jd@email.com

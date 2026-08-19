@@ -82,14 +82,17 @@ def _run_step_thread(step: str) -> None:
     _set_running(step, n=0, m=m)
     _append_log(f"[{step}] {m} élément(s) à traiter")
 
-    def on_progress():
+    def on_progress(msg: str = None):
         _inc_progress(step)
         with _lock:
             info = _running_steps.get(step, {})
         n_val = info.get('n', '?')
         m_val = info.get('m', '?')
         logger.info(f"[api_steps] on_progress {step} → {n_val}/{m_val}")
-        _append_log(f"[{step}] avancement {n_val}/{m_val}")
+        line = f"[{step}] avancement {n_val}/{m_val}"
+        if msg:
+            line += f" — {msg}"
+        _append_log(line)
 
     try:
         result = run_step(step, on_progress=on_progress)
@@ -114,11 +117,17 @@ def _run_all_thread() -> None:
         _append_log(f"[{step}] Démarrage… ({m} élément(s))")
 
         def _make_cb(s):
-            def on_progress():
-                _inc_progress(s)
+            def on_progress(msg: str = None):
+                _inc_progress(step)
                 with _lock:
-                    info = _running_steps.get(s, {})
-                _append_log(f"[{s}] {info.get('n','?')}/{info.get('m','?')}")
+                    info = _running_steps.get(step, {})
+                n_val = info.get('n', '?')
+                m_val = info.get('m', '?')
+                logger.info(f"[api_steps] on_progress {step} → {n_val}/{m_val}")
+                line = f"[{step}] avancement {n_val}/{m_val}"
+                if msg:
+                    line += f" — {msg}"
+                _append_log(line)
             return on_progress
 
         try:
@@ -167,15 +176,22 @@ async def reset_step_endpoint(
     email_id: Optional[int] = Query(None),
     run: str = Query("1"),
 ):
+    logger.info(f"[api_steps] reset/step reçu : step={step!r} email_id={email_id!r} run={run!r}")
     if step not in PIPELINE:
+        logger.warning(f"[api_steps] reset/step refusé : step inconnu {step!r} (valides={PIPELINE})")
         raise HTTPException(400, f"Step inconnu : {step!r}")
     run_after = run != "0"
     try:
         result = reset_step(step, email_id=email_id, run_after=run_after)
+        logger.info(f"[api_steps] reset/step OK : {result}")
         return {"ok": True, **result}
     except ValueError as e:
+        # FIX diagnostic : log explicite avant le 404 pour savoir si c'est
+        # "email introuvable" ou autre chose (step inconnu levé plus bas, etc.)
+        logger.warning(f"[api_steps] reset/step ValueError → 404 : {e}")
         raise HTTPException(404, str(e))
     except Exception as e:
+        logger.error(f"[api_steps] reset/step erreur inattendue → 500 : {e}", exc_info=True)
         raise HTTPException(500, str(e))
 
 
@@ -185,13 +201,17 @@ async def reset_failed_endpoint(
     email_id: Optional[int] = Query(None),
     run: str = Query("1"),
 ):
+    logger.info(f"[api_steps] reset/failed reçu : step={step!r} email_id={email_id!r} run={run!r}")
     run_after = run != "0"
     try:
         result = reset_failed(step=step, email_id=email_id, run_after=run_after)
+        logger.info(f"[api_steps] reset/failed OK : {result}")
         return {"ok": True, **result}
     except ValueError as e:
+        logger.warning(f"[api_steps] reset/failed ValueError → 404 : {e}")
         raise HTTPException(404, str(e))
     except Exception as e:
+        logger.error(f"[api_steps] reset/failed erreur inattendue → 500 : {e}", exc_info=True)
         raise HTTPException(500, str(e))
 
 
@@ -261,13 +281,13 @@ async def status_stream():
 async def delete_email_endpoint(email_id: int):
     """Supprime un email et tous ses fichiers associés de la DB."""
     cfg = get_config()
-    db  = BiDiDB(cfg.get_db_path())
+    db = BiDiDB(cfg.get_db_path())
     email = db.get_email(email_id)
     if not email:
         raise HTTPException(404, f"Email {email_id} introuvable")
     try:
         db.delete_email(email_id)
-        _broadcast_log(f"[api] email={email_id} supprimé")
+        _append_log(f"[api] email={email_id} supprimé")  # FIX : _broadcast_log → _append_log
         return {"ok": True, "deleted": email_id}
     except Exception as e:
         raise HTTPException(500, str(e))
@@ -280,15 +300,19 @@ async def reparse_endpoint(
 ):
     """Re-calcule les keywords et synchronise les hardlinks."""
     cfg = get_config()
-    db  = BiDiDB(cfg.get_db_path())
+    db = BiDiDB(cfg.get_db_path())
 
     def _run():
         try:
-            stats = _step_reparse_run(db, cfg, email_id=email_id,
-                                      on_progress=_broadcast_log)
-            _broadcast_log(f"[reparse] {stats}")
+            stats = _step_reparse_run(
+                db, cfg, email_id=email_id,
+                on_progress=lambda *a, **k: _append_log(
+                    f"[reparse] email={email_id or 'all'} — en cours..."
+                ),
+            )
+            _append_log(f"[reparse] {stats}")
         except Exception as e:
-            _broadcast_log(f"[reparse] erreur: {e}")
+            _append_log(f"[reparse] erreur: {e}")
 
     if background_tasks:
         background_tasks.add_task(_run)
@@ -302,9 +326,9 @@ async def remeta_endpoint(
     email_id: Optional[int] = Query(None),
     background_tasks: BackgroundTasks = None,
 ):
-    """Relance step_meta sur un email (ou tous les emails parsed)."""
+    """Relance step_meta sur un email (ou tous les emails parsed), y compris les failed."""
     cfg = get_config()
-    db  = BiDiDB(cfg.get_db_path())
+    db = BiDiDB(cfg.get_db_path())
 
     target_emails: list = []
     if email_id:
@@ -315,12 +339,22 @@ async def remeta_endpoint(
     else:
         target_emails = db.get_emails_by_step("parsed", step_status=None)
 
+    # FIX : step_meta.run() ignore step_status='failed' par défaut.
+    # On remet explicitement les cibles en step_status='ok' avant de lancer,
+    # + retry_failed=True comme filet de sécurité pour le cas "tous les parsed".
+    for e in target_emails:
+        if e.get("step") == "parsed" and e.get("step_status") != "ok":
+            db.advance_step(e["id"], "parsed")
+
     def _run():
         try:
-            stats = _step_meta_run(db, cfg, on_progress=_broadcast_log)
-            _broadcast_log(f"[remeta] {stats}")
+            stats = _step_meta_run(
+                db, cfg, retry_failed=True,
+                on_progress=lambda *a, **k: _append_log("[remeta] en cours..."),
+            )
+            _append_log(f"[remeta] {stats}")
         except Exception as e:
-            _broadcast_log(f"[remeta] erreur: {e}")
+            _append_log(f"[remeta] erreur: {e}")
 
     if background_tasks:
         background_tasks.add_task(_run)
