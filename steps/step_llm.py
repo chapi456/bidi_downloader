@@ -25,7 +25,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from config_manager import get_config
-from database import BiDiDB
+from database import BiDiDB,get_db  # remplace "from database import BiDiDB"
 
 if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
@@ -138,7 +138,7 @@ def run(db: BiDiDB, cfg, on_progress=None) -> dict:
 
 def main() -> None:
     cfg = get_config()
-    db  = BiDiDB(cfg.get_db_path())
+    db  = get_db()
     results = run(db, cfg)
     print(f"Résultat llm: {results}")
 

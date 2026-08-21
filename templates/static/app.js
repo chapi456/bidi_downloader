@@ -43,6 +43,20 @@ function fmtSize(b){
   return b+' B';
 }
 
+function formatTime(sec) {
+  sec = Math.floor(sec || 0);
+  const m = Math.floor(sec / 60), s = sec % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function seekToChapter(startTime) {
+  const vid = document.querySelector('#player-wrap video');
+  if (vid) {
+    vid.currentTime = startTime;
+    vid.play().catch(() => {});
+  }
+}
+
 function platIcon(p=''){
   const m={youtube:'▶',reddit:'⬤',twitter:'✖','x.com':'✖',redgifs:'⏵',pornhub:'◉',xvideos:'▷',xhamster:'◈'};
   return m[p.toLowerCase()] || '◉';
@@ -64,21 +78,24 @@ function badgeHtml(status){
 }
 
 // ── Logs ─────────────────────────────────────────────────────────────────────
-const LOG_MAX = 60;
+const LOG_MAX = 150; // buffer élargi (était 60)
 
-function log(msg, cls='l-info'){
-  const t = new Date().toLocaleTimeString('fr-FR',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
-  ['logbar','pipeline-log'].forEach(id => {
-    const el = $(id); if(!el) return;
+function log(msg, cls = 'l-info') {
+  const t = new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  ['logbar', 'pipeline-log'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    // FIX : ne suivre le bas automatiquement que si l'utilisateur y était déjà
+    // (évite de casser la lecture quand on remonte consulter l'historique)
+    const wasAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
     const line = document.createElement('div');
     line.className = `log-line ${cls}`;
-    line.textContent = `${t}  ${msg}`;
+    line.textContent = `${t} ${msg}`;
     el.appendChild(line);
-    while(el.children.length > LOG_MAX) el.firstChild.remove();
-    el.scrollTop = el.scrollHeight;
+    while (el.children.length > LOG_MAX) el.firstChild.remove();
+    if (wasAtBottom) el.scrollTop = el.scrollHeight;
   });
 }
-
 // ── Vues ─────────────────────────────────────────────────────────────────────
 function setView(v){
   $('view-gallery').classList.toggle('hidden', v !== 'gallery');
@@ -441,6 +458,24 @@ function renderModal(e){
   if(e.llm_summary){ llmSec.style.display='block'; $('llm-box').textContent = e.llm_summary; }
   else              { llmSec.style.display='none'; }
 
+  // Chapitres (PornHub scrapé, ou YouTube via yt-dlp)
+  const chSec = $('chapters-section');
+  const chapters = e.chapters || [];
+  if (chSec) {
+    if (chapters.length) {
+      chSec.style.display = 'block';
+      $('chapters-list').innerHTML = chapters.map(function (c, i) {
+        var title = c.title || ('Chapitre ' + (i + 1));
+        return '<button class="chapter-btn" onclick="seekToChapter(' + c.start_time + ')">'
+          + '<span class="chapter-time">' + formatTime(c.start_time) + '</span>'
+          + '<span class="chapter-title">' + esc(title) + '</span>'
+          + '</button>';
+      }).join('');
+    } else {
+      chSec.style.display = 'none';
+    }
+  }
+
   // Fichiers
   const fileSec = $('files-section');
   if(allFiles.length > 0){
@@ -593,7 +628,7 @@ function connectSSE() {
 }
 
 function renderTasksProgress(tasks) {
-  const wrap = id('tasks-progress');
+  const wrap = $('tasks-progress');
   if (!wrap) return;
   if (!tasks.length) {
     wrap.innerHTML = '';

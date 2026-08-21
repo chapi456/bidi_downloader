@@ -29,10 +29,14 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Generator, Optional
+import threading  # à ajouter si absent des imports existants
 
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 3
+
+_db_singleton: "BiDiDB | None" = None
+_db_singleton_lock = threading.Lock()
 
 STEPS = [
     "new",
@@ -145,6 +149,27 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_media_email     ON media_files(email_id)",
 ]
 
+
+def get_db(db_path: "Path | str | None" = None) -> "BiDiDB":
+    """
+    Singleton BiDiDB — une seule instance partagée par tout le process.
+    Remplace le pattern BiDiDB(cfg.get_db_path()) répété à chaque endpoint/
+    appel de pipeline, qui ré-exécutait _init_schema() à chaque fois (spam
+    de logs) et créait des instances non coordonnées.
+    Prépare le terrain pour une future queue de tâches (fetch/meta/...) :
+    un point d'accès DB unique facilite la sérialisation des écritures
+    si un jour un seul worker traite la queue (pas de risque de requêtes
+    en ordre dispersé cassant la base).
+    """
+    global _db_singleton
+    with _db_singleton_lock:
+        if _db_singleton is None:
+            from config_manager import get_config
+            path = db_path or get_config().get_db_path()
+            _db_singleton = BiDiDB(path)
+        return _db_singleton
+
+
 # ── Migrations ────────────────────────────────────────────────────────────────
 
 def _migrate(conn: sqlite3.Connection, current: int) -> None:
@@ -256,7 +281,12 @@ class BiDiDB:
                 _migrate(conn, current)
                 logger.info(f"[DB] Migré v{current}→v{SCHEMA_VERSION} : {self.db_path}")
             else:
-                logger.info(f"[DB] Schéma v{current} : {self.db_path}")
+                # FIX : ce cas ("déjà à jour") s'exécute à CHAQUE instanciation
+                # de BiDiDB — et comme plusieurs endpoints en créent une par
+                # requête (polling status/emails inclus), ça spammait le log
+                # en INFO à chaque appel. Un schéma à jour n'a rien d'un
+                # événement à signaler → DEBUG (silencieux par défaut).
+                logger.debug(f"[DB] Schéma v{current} : {self.db_path}")
 
     # ── Emails : création ──────────────────────────────────────────────────
 

@@ -25,7 +25,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from config_manager import get_config
-from database import BiDiDB
+from database import BiDiDB, get_db
 
 logger = logging.getLogger(__name__)
 
@@ -43,29 +43,6 @@ def _get_all_keywords(cfg) -> set[str]:
         kws = json.loads(kws)
     return {k.lower().strip() for k in (kws or []) if k}
 
-
-def _classify_keywords(
-    source_url: str,
-    subject: str,
-    body_text: str,
-    known_kws_config: set[str],
-) -> tuple[list[str], list[str]]:
-    """
-    Re-classe les mots-clés d'un email selon la config courante.
-    Retourne (known_list, unknown_list).
-    """
-    # Importer email_parser pour réutiliser la logique de détection
-    import importlib
-    ep = importlib.import_module("email_parser")
-
-    text = " ".join(filter(None, [source_url, subject, body_text])).lower()
-    known, unknown = [], []
-    for kw in known_kws_config:
-        if kw in text:
-            known.append(kw)
-        else:
-            unknown.append(kw)
-    return known, unknown
 
 
 def _get_email_files(db: BiDiDB, email_id: int, save_dir: Path) -> list[Path]:
@@ -221,10 +198,10 @@ def run(
         old_known  = email.get("known_keywords") or []
         old_unknown = email.get("unknown_keywords") or []
 
-        # Re-classifier : mots de la config présents dans le texte de l'email
-        text = " ".join(filter(None, [source_url, subject, body_text])).lower()
-        new_known   = [kw for kw in config_kws if kw in text]
-        new_unknown = [kw for kw in config_kws if kw not in text]
+        # FIX : plus de logique dupliquée — même fonction que le premier parse
+        from email_parser import find_known_keywords
+        text = " ".join(filter(None, [source_url, subject, body_text]))
+        new_known, new_unknown = find_known_keywords(text, list(config_kws))
 
         # Trier pour stabilité (même ordre = même primary kw)
         # Conserver l'ordre de config_kws pour la cohérence
@@ -283,6 +260,6 @@ if __name__ == "__main__":
                         help="Traiter uniquement cet email")
     args = parser.parse_args()
     cfg = get_config()
-    db  = BiDiDB(cfg.get_db_path())
+    db  = get_db()
     stats = run(db, cfg, email_id=args.email_id)
     print(f"Résultat reparse: {stats}")

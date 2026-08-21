@@ -99,13 +99,9 @@ def _require_server(result: dict | None) -> dict:
 # ── État TUI partagé entre threads ────────────────────────────────────────────
 
 _state: dict = {
-    "emails": [],
-    "stats": {},
-    "logs": [],
-    "filter_step": "",
-    "selected": 0,
-    "dirty": True,
-    "progress": "",   # ex: "fetch  3/10" ou "fetch  terminé"
+    "emails": [], "stats": {}, "logs": [], "filter_step": "",
+    "selected": 0, "dirty": True, "progress": "",
+    "tasks_progress": [],  # FIX : avancement JD/gallery-dl/yt-dlp
 }
 _lock = threading.Lock()
 
@@ -128,6 +124,7 @@ def _refresh() -> None:
     with _lock:
         _state["emails"] = (data or {}).get("emails", [])
         _state["stats"] = (status or {}).get("stats", {})
+        _state["tasks_progress"] = (status or {}).get("tasks_progress", [])
         _state["dirty"] = True
 
 
@@ -215,23 +212,27 @@ def _run_tui() -> None:
         stdscr.nodelay(True)
         stdscr.keypad(True)
 
-        menu_items = [*STEPS, "reparse", "remeta", "reset-step", "reset-failed", "filter", "quit"]
+        menu_items = ["all", *STEPS, "reparse", "remeta", "reset-step", "reset-failed", "filter", "quit"]
         menu_idx = 0
-
+        scroll_offset = 0
+        
         while True:
             with _lock:
-                dirty  = _state["dirty"]
+                dirty = _state["dirty"]
                 emails = list(_state["emails"])
-                stats  = dict(_state["stats"])
-                logs   = list(_state["logs"])
-                sel    = _state["selected"]
-                fstep  = _state["filter_step"]
+                stats = dict(_state["stats"])
+                logs = list(_state["logs"])
+                sel = _state["selected"]
+                fstep = _state["filter_step"]
+                prog_txt = _state.get("progress", "")
+                tp = list(_state.get("tasks_progress", []))  # FIX : lu ICI, avant usage
                 _state["dirty"] = False
 
             H, W = stdscr.getmaxyx()
-            LOG_H   = 6
-            MENU_H  = 3
-            LIST_H  = H - LOG_H - MENU_H - 2
+            LOG_H = 6
+            MENU_H = 3
+            TP_H = 1  # FIX : ligne dédiée à l'avancement des téléchargements
+            LIST_H = H - LOG_H - MENU_H - TP_H - 2
 
             if dirty:
                 stdscr.erase()
@@ -247,16 +248,39 @@ def _run_tui() -> None:
                                curses.color_pair(1) | curses.A_BOLD)
 
                 # Liste emails
-                for i, e in enumerate(emails[:LIST_H]):
-                    y    = i + 1
-                    subj = (e.get("subject") or "")[:40]
+                # FIX : fenêtre glissante qui suit la sélection — auparavant on
+                # affichait toujours emails[:LIST_H], donc au-delà de la Nème
+                # ligne visible, la sélection sortait de l'écran sans scroller.
+                if sel < scroll_offset:
+                    scroll_offset = sel
+                elif sel >= scroll_offset + LIST_H:
+                    scroll_offset = sel - LIST_H + 1
+                scroll_offset = max(0, min(scroll_offset, max(0, len(emails) - LIST_H)))
+
+                 # FIX : indexer tasks_progress par email pour affichage inline
+                tp_by_email: dict = {}
+                for t in tp:
+                    tp_by_email.setdefault(t.get("email_id"), []).append(t)
+
+                visible = emails[scroll_offset: scroll_offset + LIST_H]
+                for i, e in enumerate(visible):
+                    y = i + 1
+                    real_idx = scroll_offset + i
+                    subj = (e.get("subject") or "")[:36]
                     step = (e.get("step") or "")[:14]
-                    st   = e.get("step_status", "")
+                    st = e.get("step_status", "")
                     plat = (e.get("platform") or "-")[:8]
-                    line = f" {e['id']:>4}  {step:<16} {_badge(st)}  {subj:<40}  {plat:<8}"
-                    attr  = curses.A_REVERSE if i == sel else 0
+                    active = tp_by_email.get(e["id"])
+                    dl_pct = f"{active[0].get('pct', 0):>3}%" if active else "   "
+                    line = f" {e['id']:>4} {step:<16} {_badge(st)} {subj:<36} {plat:<8} {dl_pct}"
+                    attr = curses.A_REVERSE if real_idx == sel else 0
                     color = curses.color_pair(STEP_COLORS.get(st, 5))
                     stdscr.addnstr(y, 0, line[:W], W, color | attr)
+
+                # Indicateur de scroll (optionnel mais utile)
+                if len(emails) > LIST_H:
+                    pos_lbl = f"[{scroll_offset+1}-{min(scroll_offset+LIST_H, len(emails))}/{len(emails)}]"
+                    stdscr.addnstr(0, W - len(pos_lbl) - 1, pos_lbl, len(pos_lbl), curses.color_pair(1))
 
                 # Menu
                 menu_y = LIST_H + 1
@@ -272,12 +296,21 @@ def _run_tui() -> None:
                     " ↑↓:email  ←→:menu  ENTER:action  r:refresh  q:quit",
                     W, curses.color_pair(4))
 
-                # Zone progression (bleue, fixe)
+                # Zone progression pipeline (bleue, fixe)
                 prog_y = menu_y + MENU_H
-                with _lock:
-                    prog_txt = _state.get("progress", "")
+                # FIX : prog_txt et tp déjà lus en tête de boucle, plus besoin de re-lock ici
                 prog_line = f" ⏳ {prog_txt}" if prog_txt else ""
                 stdscr.addnstr(prog_y, 0, prog_line.ljust(W), W, curses.color_pair(1))
+
+                # FIX : avancement des téléchargements actifs (JD/gallery-dl/yt-dlp)
+                tp_y = prog_y + 1
+                if tp:
+                    avg = sum(t.get("pct", 0) for t in tp) // len(tp)
+                    detail = " | ".join(f"t{t['task_id']}:{t.get('pct',0)}%" for t in tp[:4])
+                    tp_line = f" ⬇ {len(tp)} DL actif(s) (moy. {avg}%) — {detail}"
+                else:
+                    tp_line = ""
+                stdscr.addnstr(tp_y, 0, tp_line.ljust(W)[:W], W, curses.color_pair(4))
 
                 # Log
                 log_y = H - LOG_H
@@ -359,7 +392,7 @@ def _run_tui() -> None:
                     eid = em["id"] if em else None
                     threading.Thread(target=lambda: _post(f"/api/remeta" + (f"?email_id={eid}" if eid else ""), {}), daemon=True).start()
                     _add_log(f"remeta lancé (email={eid or 'tous'})")
-                elif action in STEPS:
+                elif action in STEPS or action == "all":
                     threading.Thread(target=_run_step, args=(action,), daemon=True).start()
 
     curses.wrapper(_main)
@@ -709,12 +742,14 @@ def main() -> None:
         get_config(args.config)
 
     if args.command is None:
-        # Mode TUI par défaut
         threading.Thread(target=_poller, daemon=True).start()
         try:
             import curses
             _run_tui()
-        except Exception:
+        except Exception as e:
+            import traceback
+            print(f"[bidi] TUI indisponible ({e}), bascule en mode texte.", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
             _run_text()
         return
 

@@ -43,6 +43,36 @@ _MARKDOWN_RE = re.compile(
 
 _TOKEN_RE = re.compile(r'[a-zA-Z0-9_]+')
 
+_WORD_RE_CACHE: dict = {}
+
+def find_known_keywords(text: str, known_keywords: List[str]) -> tuple:
+    """
+    Détection souple des mots-clés connus dans un texte quelconque.
+    Recherche par sous-chaîne insensible à la casse, sur mot/phrase entière
+    (bordures non-alphanumériques) pour éviter les faux positifs — ex: le
+    keyword "x" ne doit pas matcher à l'intérieur de "sex" ou "box".
+    Ignore totalement la position dans le texte (ligne, sauts de ligne,
+    signature) — cherche dans TOUT le texte fourni.
+    Retourne (found, not_found), dans l'ordre de known_keywords (stable).
+    """
+    text_lower = (text or "").lower()
+    found, not_found = [], []
+    for kw in known_keywords:
+        kw_l = (kw or "").lower().strip()
+        if not kw_l:
+            continue
+        pattern = _WORD_RE_CACHE.get(kw_l)
+        if pattern is None:
+            pattern = re.compile(
+                r'(?<![a-z0-9_])' + re.escape(kw_l) + r'(?![a-z0-9_])',
+                re.IGNORECASE,
+            )
+            _WORD_RE_CACHE[kw_l] = pattern
+        if pattern.search(text_lower):
+            found.append(kw)
+        else:
+            not_found.append(kw)
+    return found, not_found
 
 @dataclass
 class ParseResult:
@@ -96,7 +126,12 @@ def _join_continuation_lines(lines: list) -> list:
 
 
 def parse_email_body(body, known_keywords: List[str]) -> ParseResult:
-    """Extrait URL + mots-clés depuis le corps d'un email."""
+    """
+    Extrait URL + mots-clés depuis le corps d'un email.
+    FIX : détection des known_keywords souple — recherche dans TOUT le corps
+    du mail (plus seulement la ligne suivant l'URL), robuste aux sauts de
+    ligne supplémentaires, signatures, artefacts de conversion HTML→texte.
+    """
     if not body:
         return ParseResult()
 
@@ -118,25 +153,19 @@ def parse_email_body(body, known_keywords: List[str]) -> ParseResult:
         logger.debug("parse_email_body: aucune URL trouvée")
         return ParseResult()
 
-    raw_kws: list = []
+    # FIX : détection souple sur le corps entier, pas juste les lignes proches
+    known_found, _ = find_known_keywords(body, known_keywords)
+
+    # unknown_kws : purement informatif (affichage), best-effort sur la ligne
+    # suivant l'URL — n'affecte jamais le classement known/unknown.
+    unknown_kws: list = []
     for nxt in lines[url_idx + 1: url_idx + 4]:
         if _has_url(nxt):
             break
         tokens = [t.lower() for t in nxt.split() if _TOKEN_RE.match(t)]
         if tokens:
-            raw_kws = tokens
+            known_lower = {k.lower() for k in known_found}
+            unknown_kws = [t for t in tokens if t not in known_lower]
             break
 
-    seen: set = set()
-    deduped: list = []
-    for kw in raw_kws:
-        if kw not in seen:
-            seen.add(kw)
-            deduped.append(kw)
-
-    known_lower = {k.lower() for k in known_keywords}
-    return ParseResult(
-        url=url,
-        known_kws=[kw for kw in deduped if kw in known_lower],
-        unknown_kws=[kw for kw in deduped if kw not in known_lower],
-    )
+    return ParseResult(url=url, known_kws=known_found, unknown_kws=unknown_kws)

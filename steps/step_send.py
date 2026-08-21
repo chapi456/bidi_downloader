@@ -28,7 +28,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from config_manager import get_config
-from database import BiDiDB
+from database import BiDiDB, get_db
 
 logger = logging.getLogger(__name__)
 
@@ -270,5 +270,5 @@ def run(db: BiDiDB, cfg, on_progress=None) -> dict:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     cfg = get_config()
-    db  = BiDiDB(cfg.get_db_path())
+    db  = get_db()
     print(run(db, cfg))

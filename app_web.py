@@ -33,14 +33,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from config_manager import get_config
-from database import BiDiDB
+from database import get_db # remplace "from database import BiDiDB"
 from api_steps import router as steps_router
 
 logger = logging.getLogger(__name__)
 VERSION = "3.4.0"
 
 cfg = get_config()
-db  = BiDiDB(cfg.get_db_path())
+db  = get_db()
 app = FastAPI(title="BiDi Media Manager", version=VERSION)
 
 templates = Jinja2Templates(directory=str(ROOT / "templates"))
@@ -70,13 +70,9 @@ def _file_type(filepath: str) -> str:
 
 
 def _media_url(filepath: str) -> str:
-    """Construit l'URL /media/<rel> à partir d'un filepath DB."""
     fp = Path(filepath)
     if fp.is_absolute():
-        try:
-            rel = fp.relative_to(save_dir)
-        except ValueError:
-            rel = fp
+        rel = Path(_safe_relative_path(fp, save_dir))
     else:
         rel = fp
     return "/media/" + rel.as_posix().lstrip("/")
@@ -111,31 +107,28 @@ def _serialize_email(email: dict) -> dict:
 
 # ── FIX log /api/status : filtre appliqué après init uvicorn via on_startup ──
 
-class _SuppressPollingOK(logging.Filter):
-    """
-    Masque les requêtes GET de polling silencieux (CLI + interface web)
-    qui n'apportent aucune information utile au suivi du pipeline.
-    Les POST (actions) et les GET en erreur restent toujours visibles.
-    """
-    _SILENT_GET_PREFIXES = (
-        '"GET /api/status',
-        '"GET /api/emails',
-        '"GET /api/stats',
-        '"GET /static/',
-        '"GET / HTTP',
-    )
+from starlette.middleware.base import BaseHTTPMiddleware
 
-    def filter(self, record: logging.LogRecord) -> bool:
-        msg = record.getMessage()
-        if '" 200 ' not in msg and '" 304 ' not in msg:
-            return True  # erreurs/autres codes toujours visibles
-        return not any(p in msg for p in self._SILENT_GET_PREFIXES)
+# FIX définitif : le filtre sur uvicorn.access ne tenait pas de façon fiable
+# (dépend trop des internals uvicorn selon version). On désactive complètement
+# le logging d'accès natif d'uvicorn (access_log=False dans uvicorn.run) et on
+# logge nous-mêmes via ce middleware, qu'on contrôle entièrement.
+_SILENT_PREFIXES = ("/api/status", "/api/emails", "/api/stats", "/static/")
 
-@app.on_event("startup")
-async def _apply_log_filter() -> None:
-    """Appliqué APRÈS que uvicorn a (re)configuré ses loggers → filtre persiste."""
-    logging.getLogger("uvicorn.access").addFilter(_SuppressPollingOK())
+class _AccessLogMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        is_silent_poll = (
+            request.method == "GET"
+            and response.status_code in (200, 304)
+            and any(path == p or path.startswith(p) for p in _SILENT_PREFIXES)
+        )
+        if not is_silent_poll:
+            logger.info(f'"{request.method} {path}" {response.status_code}')
+        return response
 
+app.add_middleware(_AccessLogMiddleware)
 
 # ── API emails ────────────────────────────────────────────────────────────────
 
@@ -229,6 +222,26 @@ async def home(request: Request):
 async def health():
     return {"ok": True, "status": "healthy"}
 
+def _safe_relative_path(fpath: Path, base: Path) -> str:
+    """
+    Calcule un chemin relatif fiable même en cas de différence de casse du
+    lecteur Windows entre le chemin réel (ex: JD renvoie 'd:\\...') et
+    save_dir configuré ('D:\\...') — Path.relative_to() est sensible à la
+    casse et levait ValueError, faisant fuir le chemin ABSOLU en DB →
+    URL /media/ cassée (vidéo non jouable côté web).
+    """
+    try:
+        return str(fpath.relative_to(base))
+    except ValueError:
+        pass
+    import os
+    try:
+        rel = os.path.relpath(str(fpath), str(base))
+        if not rel.startswith(".."):
+            return rel
+    except ValueError:
+        pass
+    return str(fpath)
 
 # ── Lancement ─────────────────────────────────────────────────────────────────
 
@@ -253,5 +266,6 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT,  _force_exit)
 
     uvicorn.run(app, host=host, port=port, log_level="info",
+                access_log=False,  # FIX : remplacé par _AccessLogMiddleware
                 timeout_graceful_shutdown=1)
     os._exit(0)

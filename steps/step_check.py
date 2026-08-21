@@ -30,7 +30,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from config_manager import get_config
-from database import BiDiDB
+from database import BiDiDB, get_db  # remplace "from database import BiDiDB"
 
 logger = logging.getLogger(__name__)
 
@@ -100,12 +100,10 @@ def _register_files(
     existing = {mf["file_path"] for mf in db.get_media_files(email_id)}
     added = 0
     for i, fpath in enumerate(files):
-        try:
-            rel = str(fpath.relative_to(save_dir))
-        except ValueError:
-            rel = str(fpath)
+        rel = _safe_relative_path(fpath, save_dir)
         if rel in existing:
             continue
+        
         ftype      = "thumbnail" if is_thumb else _classify(fpath)
         is_primary = (not is_thumb) and (i == 0) and (added == 0)
         db.add_media_file(
@@ -120,9 +118,9 @@ def _register_files(
     return added
 
 
-def _try_advance_email(db: BiDiDB, email_id: int) -> bool:
+def _try_advance_email(db: BiDiDB, email_id: int, on_progress=None) -> bool:
     """Avance l'email à download_done si toutes les tasks primaires sont terminales."""
-    tasks   = db.get_download_tasks(email_id)
+    tasks = db.get_download_tasks(email_id)
     primary = [t for t in tasks if t.get("url_type") == "primary"]
     if not primary:
         return False
@@ -134,7 +132,8 @@ def _try_advance_email(db: BiDiDB, email_id: int) -> bool:
         return False
     if any(t["status"] == "done" for t in primary):
         db.advance_step(email_id, "download_done")
-        if on_progress: on_progress()
+        if on_progress:
+            on_progress()
         logger.info(f"email={email_id} → download_done")
         return True
     else:
@@ -175,7 +174,7 @@ def _poll_jd_tasks(db: BiDiDB, cfg, save_dir: Path, stats: dict, on_progress) ->
         pkg_name = task["jd_package_name"]
 
         try:
-            prog = get_package_progress(cfg, pkg_name)
+            prog = get_package_progress(cfg, pkg_name, task.get("jd_package_uuid"))
         except Exception as e:
             logger.warning(f"[check] JD poll task={task_id}: {e}")
             continue
@@ -191,7 +190,10 @@ def _poll_jd_tasks(db: BiDiDB, cfg, save_dir: Path, stats: dict, on_progress) ->
             continue
 
         pct = prog.get("pct", 0)
-        db.set_task_progress(task_id, pct)
+        prev_pct = task.get("progress_pct") or 0
+        if pct >= prev_pct:  # FIX : évite d'afficher un % qui redescend
+            db.set_task_progress(task_id, pct)
+            
         logger.info(
             f"task={task_id} JD {pct}% "
             f"({prog.get('loaded_mb', 0):.0f}/{prog.get('total_mb', 0):.0f} Mo)"
@@ -226,10 +228,18 @@ def _poll_jd_tasks(db: BiDiDB, cfg, save_dir: Path, stats: dict, on_progress) ->
             db.set_task_done(task_id)
             logger.info(f"task={task_id} JD finished — {len(found_files)} fichier(s)")
             stats["rescanned"] = stats.get("rescanned", 0) + 1
-            if _try_advance_email(db, email_id):
+            if _try_advance_email(db, email_id, on_progress):
                 stats["emails_done"] = stats.get("emails_done", 0) + 1
-                if on_progress:
-                    on_progress()
+            if on_progress:
+                on_progress()
+            # FIX : nettoyer le package terminé côté JD (garde sa liste
+            # de downloads légère, évite de dépasser maxResults=200 à terme)
+            try:
+                from jd_client import cleanup_package
+                if prog.get("uuid"):
+                    cleanup_package(cfg, prog["uuid"])
+            except Exception as e:
+                logger.debug(f"[check] cleanup JD task={task_id} échoué (ignoré): {e}")
         else:
             db.set_task_failed(task_id, "JD finished mais aucun fichier trouvé")
             logger.warning(f"task={task_id} JD finished mais aucun fichier")
@@ -261,6 +271,18 @@ def run(db: BiDiDB, cfg, on_progress=None) -> dict:
 
         # Cas 1 — ok : run_task a tout géré, fichiers déjà en DB
         if step_status == "ok":
+            # FIX : step_status='ok' ne veut PAS dire "terminé" pour JDownloader
+            # (asynchrone, avancé immédiatement par step_send). On vérifie l'état
+            # réel des tasks avant de conclure à un échec — sinon on marquait
+            # l'email failed alors que JD téléchargeait encore (ex: 11%).
+            tasks = db.get_download_tasks(email_id)
+            primary_tasks = [t for t in tasks if t.get("url_type") == "primary"]
+            still_pending = any(t["status"] in ("sent", "pending") for t in primary_tasks)
+            if still_pending:
+                logger.debug(f"email={email_id}: tâche(s) encore en cours (JD) — skip")
+                stats["skipped"] += 1
+                continue
+
             files = db.get_media_files(email_id)
             if files:
                 db.advance_step(email_id, "download_done")
@@ -310,7 +332,7 @@ def run(db: BiDiDB, cfg, on_progress=None) -> dict:
 
             email_needs_advance = True
 
-        if email_needs_advance and _try_advance_email(db, email_id):
+        if email_needs_advance and _try_advance_email(db, email_id, on_progress):
             stats["emails_done"] += 1
 
     # ── Cas 3 : tasks 'sent' orphelines hors emails download_sent ──────────
@@ -354,15 +376,36 @@ def run(db: BiDiDB, cfg, on_progress=None) -> dict:
             email_ids.add(email_id)
 
         for email_id in email_ids:
-            if _try_advance_email(db, email_id):
+            if _try_advance_email(db, email_id, on_progress):
                 stats["emails_done"] += 1
 
     return stats
+
+def _safe_relative_path(fpath: Path, base: Path) -> str:
+    """
+    Calcule un chemin relatif fiable même en cas de différence de casse du
+    lecteur Windows entre le chemin réel (ex: JD renvoie 'd:\\...') et
+    save_dir configuré ('D:\\...') — Path.relative_to() est sensible à la
+    casse et levait ValueError, faisant fuir le chemin ABSOLU en DB →
+    URL /media/ cassée (vidéo non jouable côté web).
+    """
+    try:
+        return str(fpath.relative_to(base))
+    except ValueError:
+        pass
+    import os
+    try:
+        rel = os.path.relpath(str(fpath), str(base))
+        if not rel.startswith(".."):
+            return rel
+    except ValueError:
+        pass
+    return str(fpath)
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     cfg  = get_config()
-    db   = BiDiDB(cfg.get_db_path())
+    db   = get_db()
     result = run(db, cfg)
     print(f"Résultat check: {result}")

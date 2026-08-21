@@ -79,33 +79,38 @@ def add_download(cfg, url: str, dest_dir: Path) -> tuple[str, str | None]:
     return pkg_name, pkg_uuid
 
 
-def get_package_progress(cfg, pkg_name: str) -> dict:
+def get_package_progress(cfg, pkg_name: str, pkg_uuid: str | None = None) -> dict:
     """
     Interroge JD pour l'état d'un package.
     Retourne:
-      {
-        "found": bool,
-        "finished": bool,
-        "pct": int,            # 0-100
-        "loaded_mb": float,
-        "total_mb": float,
-        "save_to": str | None,
-        "uuid": str | None,
-        "files": [str],        # noms de fichiers si finished
-      }
+    {
+      "found": bool,
+      "finished": bool,
+      "pct": int,        # 0-100
+      "loaded_mb": float,
+      "total_mb": float,
+      "save_to": str | None,
+      "uuid": str | None,
+      "files": [str],    # noms de fichiers si finished
+    }
+
+    FIX : matching par UUID en priorité — le Packagizer JDownloader peut
+    renommer un package (ex: titre PornHub détecté) malgré
+    overwritePackagizerRules=True, cassant tout matching par nom. L'UUID,
+    récupéré juste après add_download() avant tout renommage, reste stable.
     """
     result = {
         "found": False, "finished": False, "pct": 0,
         "loaded_mb": 0.0, "total_mb": 0.0,
         "save_to": None, "uuid": None, "files": [],
     }
+
     try:
         device = _connect(cfg)
     except Exception as e:
         logger.warning(f"[JD] get_progress connexion: {e}")
         return result
 
-    # Chercher dans downloads
     try:
         all_pkgs = device.downloads.query_packages([{
             "finished": True, "running": True,
@@ -117,22 +122,32 @@ def get_package_progress(cfg, pkg_name: str) -> dict:
         logger.warning(f"[JD] query_packages: {e}")
         return result
 
-    pkg = next((p for p in all_pkgs if p.get("name") == pkg_name), None)
+    pkg = None
+    if pkg_uuid:
+        pkg = next((p for p in all_pkgs if str(p.get("uuid")) == str(pkg_uuid)), None)
+    if pkg is None:
+        pkg = next((p for p in all_pkgs if p.get("name") == pkg_name), None)
+        if pkg is not None and pkg_uuid:
+            logger.warning(
+                f"[JD] pkg '{pkg_name}' retrouvé par NOM seulement "
+                f"(uuid={pkg_uuid} introuvable) — le Packagizer JD a "
+                f"probablement renommé le package"
+            )
     if not pkg:
         return result
 
     loaded = pkg.get("bytesLoaded") or 0
-    total  = pkg.get("bytesTotal") or 0
-    pct    = int(loaded / total * 100) if total else 0
+    total = pkg.get("bytesTotal") or 0
+    pct = int(loaded / total * 100) if total else 0
 
     result.update({
-        "found":      True,
-        "finished":   bool(pkg.get("finished")),
-        "pct":        pct,
-        "loaded_mb":  round(loaded / 1_048_576, 1),
-        "total_mb":   round(total  / 1_048_576, 1),
-        "save_to":    pkg.get("saveTo"),
-        "uuid":       str(pkg.get("uuid")) if pkg.get("uuid") else None,
+        "found": True,
+        "finished": bool(pkg.get("finished")),
+        "pct": pct,
+        "loaded_mb": round(loaded / 1_048_576, 1),
+        "total_mb": round(total / 1_048_576, 1),
+        "save_to": pkg.get("saveTo"),
+        "uuid": str(pkg.get("uuid")) if pkg.get("uuid") else None,
     })
 
     if result["finished"]:
@@ -182,15 +197,21 @@ def get_all_active_packages(cfg) -> list[dict]:
 
 
 def cleanup_package(cfg, pkg_uuid: str) -> None:
-    """Supprime un package terminé de la liste JD."""
+    """
+    Retire un package terminé de la LISTE JD uniquement.
+    FIX CRITIQUE : "REMOVE_LINKS_AND_DELETE_FILES" supprimait aussi les
+    fichiers physiques sur disque juste après leur enregistrement en DB —
+    on utilise "REMOVE_LINKS_ONLY" qui ne touche jamais aux fichiers réels,
+    seulement à l'entrée dans l'interface JDownloader.
+    """
     try:
         device = _connect(cfg)
         device.downloads.cleanup(
             "DELETE_FINISHED",
-            "REMOVE_LINKS_AND_DELETE_FILES",
+            "REMOVE_LINKS_ONLY",
             "SELECTED",
             package_ids=[int(pkg_uuid)],
         )
-        logger.info(f"[JD] cleanup pkg_uuid={pkg_uuid}")
+        logger.info(f"[JD] cleanup (liste seulement) pkg_uuid={pkg_uuid}")
     except Exception as e:
         logger.warning(f"[JD] cleanup échoué: {e}")

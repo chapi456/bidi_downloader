@@ -35,7 +35,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from config_manager import get_config
-from database import BiDiDB
+from database import BiDiDB, get_db
 
 logger = logging.getLogger(__name__)
 
@@ -342,9 +342,28 @@ def _download_direct(url: str, tmp_dir: Path, task_id: int) -> list[Path]:
 # ── Enregistrement DB ─────────────────────────────────────────────────────────
 
 def _register(db: BiDiDB, email_id: int, task_id: int,
-              files: list[Path], save_dir: Path) -> None:
+               files: list[Path], save_dir: Path,
+               url_type: str = "primary") -> None:
+    """
+    FIX : classification thumbnail basée sur url_type de la task (schéma DB),
+    plus fiable que le pattern de nom de fichier (_is_thumb_file) qui ratait
+    les thumbnails CDN sans convention reconnue (ex: pbs.twimg.com
+    amplify_video_thumb/...jpg, enregistrés à tort comme "image" primaire).
+    FIX : is_primary priorise désormais une vidéo si présente, jamais un
+    thumbnail — condition pour l'autoplay et l'exclusion de la liste médias.
+    """
     existing = {mf["file_path"] for mf in db.get_media_files(email_id)}
-    for i, f in enumerate(files):
+
+    typed: list[tuple[Path, str]] = []
+    for f in files:
+        ftype = "thumbnail" if (url_type == "thumbnail" or _is_thumb_file(f)) else _classify(f)
+        typed.append((f, ftype))
+
+    primary_idx = next((i for i, (_, t) in enumerate(typed) if t == "video"), None)
+    if primary_idx is None:
+        primary_idx = next((i for i, (_, t) in enumerate(typed) if t != "thumbnail"), 0)
+
+    for i, (f, ftype) in enumerate(typed):
         try:
             rel = str(f.relative_to(save_dir))
         except ValueError:
@@ -352,20 +371,15 @@ def _register(db: BiDiDB, email_id: int, task_id: int,
         if rel in existing:
             logger.debug(f"[register] déjà en base : {rel}")
             continue
-        ftype      = "thumbnail" if _is_thumb_file(f) else _classify(f)
-        is_primary = (i == 0 and ftype != "thumbnail")
+        is_primary = (i == primary_idx)
         db.add_media_file(
-            email_id=email_id,
-            task_id=task_id,
-            file_path=rel,
-            file_type=ftype,
-            file_size=f.stat().st_size if f.exists() else None,
+            email_id=email_id, task_id=task_id, file_path=rel,
+            file_type=ftype, file_size=f.stat().st_size if f.exists() else None,
             is_primary=is_primary,
         )
         logger.info(
             f"[register] task={task_id} email={email_id} "
-            f"type={ftype!r:12} primary={is_primary} "
-            f"is_thumb_pattern={_is_thumb_file(f)} "
+            f"type={ftype!r:12} primary={is_primary} url_type={url_type!r} "
             f"file={f.name!r}"
         )
 
@@ -495,7 +509,8 @@ def run_task(db: BiDiDB, task: dict, email: dict, progress_cb=None) -> bool:
     db.set_task_output_dir(task_id, rel_dest)
 
     # ── Enregistrement fichiers en DB ─────────────────────────────────────
-    _register(db, email_id, task_id, final_files, save_dir)
+    _register(db, email_id, task_id, final_files, save_dir,
+              url_type=task.get("url_type", "primary"))
     db.set_task_done(task_id)
 
     n_media = sum(1 for f in final_files if not _is_thumb_file(f))
@@ -524,7 +539,7 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = get_config()
-    db  = BiDiDB(cfg.get_db_path())
+    db  = get_db()
 
     logger.info(f"=== run_task --task-id {args.task_id} ===")
 

@@ -37,6 +37,9 @@ reddit:
 twitter:
   cookies_path: x.com_cookies.txt
 
+pornhub:
+  cookies_path: fr.pornhub.com_cookies.txt
+
 jdownloader:
   enabled: true
   email: mon.jd@email.com

@@ -25,6 +25,9 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Optional
 
+from config_manager import get_config
+from database import BiDiDB, get_db  # remplace "from database import BiDiDB"
+
 logger = logging.getLogger(__name__)
 
 # ── Helpers décodage ──────────────────────────────────────────────────────────
@@ -320,9 +323,7 @@ if __name__ == "__main__":
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     logging.basicConfig(level=logging.DEBUG, format="%(levelname)s [%(name)s] %(message)s")
-    from config_manager import get_config
-    from database import BiDiDB
     cfg = get_config()
-    db = BiDiDB(cfg.get_db_path())
+    db = get_db()
     result = run(db, cfg)
     print(result)

@@ -27,7 +27,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from config_manager import get_config
-from database import BiDiDB
+from database import BiDiDB, get_db  # remplace "from database import BiDiDB"
+
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +146,7 @@ def _call_run(step: str, run_fn, db: BiDiDB, cfg, on_progress=None) -> dict:
 def run_step(step: str, on_progress=None) -> dict:
     """Lance un seul step. Retourne le dict résultat du step."""
     cfg = get_config()
-    db  = BiDiDB(cfg.get_db_path())
+    db  = get_db()
     logger.info(f"[pipeline] → {step}")
     try:
         run_fn = _load_run(step)
@@ -162,7 +163,7 @@ def count_step(step: str) -> int:
     Importe le module du step directement (même mécanique que _load_run)
     puis appelle count() avec _call_count pour garantir la même signature."""
     cfg = get_config()
-    db  = BiDiDB(cfg.get_db_path())
+    db  = get_db()
     module_path = _STEP_MODULE.get(step)
     if not module_path:
         logger.warning(f"[pipeline] count_step({step}) : step inconnu")
@@ -209,7 +210,7 @@ def reset_step(step: str, *, email_id: Optional[int] = None,
         raise ValueError(f"Step inconnu : {step!r}")
 
     cfg = get_config()
-    db = BiDiDB(cfg.get_db_path())
+    db = get_db()
 
     target = _STEP_INPUT_STATE.get(step)
     if target is None:
@@ -258,7 +259,7 @@ def reset_failed(*, step: Optional[str] = None,
                  run_after: bool = False) -> dict:
     """Remet tous les emails failed (ou d'un step précis) à l'état ok."""
     cfg = get_config()
-    db  = BiDiDB(cfg.get_db_path())
+    db  = get_db()
 
     if email_id:
         emails = [db.get_email(email_id)]

@@ -37,7 +37,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from config_manager import get_config
-from database import BiDiDB
+from database import get_db  # remplace "from database import BiDiDB"
 from pipeline import PIPELINE, run_step, run_all, reset_step, reset_failed, count_step
 from steps.step_reparse import run as _step_reparse_run
 from steps.step_meta    import run as _step_meta_run
@@ -219,21 +219,36 @@ async def reset_failed_endpoint(
 
 @router.get("/status")
 async def get_status():
-    db = BiDiDB(get_config().get_db_path())
+    db = get_db()
     stats = db.get_stats()
     with _lock:
-        running       = list(_running_steps.keys())
+        running = list(_running_steps.keys())
         running_steps = {k: dict(v) for k, v in _running_steps.items()}
-        logs          = list(_log_lines[-50:])
+        logs = list(_log_lines[-50:])
+    # FIX : tasks_progress était exposé uniquement dans le flux SSE,
+    # jamais dans ce GET simple — bidi_cli (polling, pas SSE) ne le voyait donc jamais.
+    tasks_progress = []
+    try:
+        for t in db.get_tasks_by_status("sent"):
+            tasks_progress.append({
+                "task_id": t["id"],
+                "email_id": t["email_id"],
+                "downloader": t.get("downloader", ""),
+                "pct": t.get("progress_pct", 0),
+                "pkg_name": t.get("jd_package_name"),
+            })
+    except Exception:
+        pass
     return {"ok": True, "stats": stats, "running_tasks": running,
-            "running_steps": running_steps, "recent_logs": logs}
+            "running_steps": running_steps, "recent_logs": logs,
+            "tasks_progress": tasks_progress}
 
 
 @router.get("/status/stream")
 async def status_stream():
     """Server-Sent Events : stats + logs toutes les 2 s."""
     async def generator():
-        db = BiDiDB(get_config().get_db_path())
+        db = get_db()
         last_idx = 0
         while True:
             stats = db.get_stats()
@@ -281,7 +296,7 @@ async def status_stream():
 async def delete_email_endpoint(email_id: int):
     """Supprime un email et tous ses fichiers associés de la DB."""
     cfg = get_config()
-    db = BiDiDB(cfg.get_db_path())
+    db = get_db()
     email = db.get_email(email_id)
     if not email:
         raise HTTPException(404, f"Email {email_id} introuvable")
@@ -300,7 +315,7 @@ async def reparse_endpoint(
 ):
     """Re-calcule les keywords et synchronise les hardlinks."""
     cfg = get_config()
-    db = BiDiDB(cfg.get_db_path())
+    db = db = get_db()
 
     def _run():
         try:
@@ -328,7 +343,7 @@ async def remeta_endpoint(
 ):
     """Relance step_meta sur un email (ou tous les emails parsed), y compris les failed."""
     cfg = get_config()
-    db = BiDiDB(cfg.get_db_path())
+    db = get_db()
 
     target_emails: list = []
     if email_id:

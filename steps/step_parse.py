@@ -25,7 +25,7 @@ if str(Path(__file__).resolve().parent.parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config_manager import get_config
-from database import BiDiDB
+from database import BiDiDB, get_db  # remplace "from database import BiDiDB"
 from email_parser import parse_email_body
 
 logger = logging.getLogger(__name__)
@@ -131,6 +131,6 @@ def run(db: BiDiDB, keywords: list[str], on_progress=None) -> dict:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s [%(name)s] %(message)s")
     cfg = get_config()
-    db = BiDiDB(cfg.get_db_path())
+    db = get_db()
     stats = run(db, cfg.get_keywords())
     print(f"Résultat parse : {stats}")

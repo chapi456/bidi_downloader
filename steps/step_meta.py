@@ -42,7 +42,7 @@ from pathlib import Path
 if str(Path(__file__).resolve().parent.parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from database import BiDiDB
+from database import BiDiDB, get_db
 from config_manager import get_config
 
 logger = logging.getLogger(__name__)
@@ -57,10 +57,71 @@ PLATFORM_MAP = {
 
 KNOWN_UNSUPPORTED = [
     "Unsupported URL", "Unable to extract", "No video formats found",
-    # FIX : message renvoyé par yt-dlp pour les tweets X/Twitter contenant
-    # uniquement des images (pas de vidéo) — cas normal, pas une vraie erreur.
     "No video could be found",
+    # FIX : erreurs HTTP génériques sur sites adultes (PornHub 410/403,
+    # souvent liées à un extracteur yt-dlp périmé ou une vérification d'âge).
+    # Le téléchargement réel (JDownloader/gallery-dl) a sa propre logique de
+    # résolution, indépendante de yt-dlp — il peut réussir même si l'extraction
+    # de métadonnées échoue. On ne bloque donc plus la création de la tâche.
+    "HTTP Error 410", "HTTP Error 403", "HTTP Error 451",
 ]
+
+_PORNHUB_ACTIONTAGS_RE = re.compile(r'"actionTags"\s*:\s*"([^"]*)"')
+
+
+def _fetch_pornhub_page_html(url: str, cookies_path: str | None, timeout: int = 15) -> str:
+    """Récupère le HTML brut de la page PornHub (avec cookies si dispo)."""
+    import http.cookiejar
+    import urllib.request
+
+    cj = http.cookiejar.MozillaCookieJar()
+    if cookies_path and Path(cookies_path).exists():
+        try:
+            cj.load(str(cookies_path), ignore_discard=True, ignore_expires=True)
+        except Exception as e:
+            logger.warning(f"meta pornhub chapters: cookies non chargés: {e}")
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+    opener.addheaders = [
+        ("User-Agent",
+         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"),
+        ("Accept-Encoding", "identity"),  # FIX : évite une réponse gzippée mal décodée
+    ]
+    with opener.open(url, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+def _extract_pornhub_chapters(html: str) -> list[dict]:
+    """
+    Extrait les chapitres PornHub depuis le champ 'actionTags' embarqué dans
+    le flashvars JS de la page. Format réel observé :
+      "actionTags":"Titty Fucking:189,Handjob:224,Titty Fucking:305,Handjob:420"
+    → liste de "Label:secondes" séparés par des virgules (pas un tableau JSON).
+    Retourne [] si le champ est absent ou vide — jamais d'exception.
+    """
+    m = _PORNHUB_ACTIONTAGS_RE.search(html)
+    if not m:
+        return []
+    raw = m.group(1).strip().replace("\\/", "/")
+    if not raw:
+        return []
+
+    chapters = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry or ":" not in entry:
+            continue
+        label, _, time_str = entry.rpartition(":")
+        try:
+            start = float(time_str)
+        except ValueError:
+            continue
+        chapters.append({
+            "title": label.strip() or f"Chapitre {len(chapters) + 1}",
+            "start_time": start,
+        })
+
+    chapters.sort(key=lambda c: c["start_time"])
+    return chapters
 
 # FIX : pattern de détection URL subreddit racine (sans /comments/)
 # Exemples bloquants : https://www.reddit.com/r/tittyfuck/
@@ -69,6 +130,23 @@ _SUBREDDIT_ROOT_RE = re.compile(
     r'^https?://(?:www\.)?reddit\.com/r/[^/]+/?$', re.IGNORECASE
 )
 
+def _guess_platform_from_url(url: str) -> str | None:
+    """Fallback : déduit la plateforme depuis l'URL quand l'extraction
+    yt-dlp échoue complètement (ex: HTTP 410) et ne renseigne rien."""
+    u = (url or "").lower()
+    if "pornhub.com" in u:
+        return "pornhub"
+    if "reddit.com" in u or "redd.it" in u:
+        return "reddit"
+    if "twitter.com" in u or "x.com" in u:
+        return "twitter"
+    if "redgifs.com" in u:
+        return "redgifs"
+    if "xhamster.com" in u:
+        return "xhamster"
+    if "xvideos.com" in u:
+        return "xvideos"
+    return None
 
 def _is_subreddit_root(url: str) -> bool:
     """True si l'URL pointe sur un subreddit entier, pas un post spécifique."""
@@ -487,6 +565,8 @@ def run(db: BiDiDB, cfg, *, yt_dlp_timeout: int = 60,
                 yt_cookies = None
                 if _is_twitter_url(source_url):
                     yt_cookies = cfg.get_twitter_cookies_path()
+                elif "pornhub.com" in source_url.lower():
+                    yt_cookies = cfg.get_pornhub_cookies_path()
                 logger.info(
                     f"meta {i}/{len(emails)}: email={email_id} "
                     f"yt-dlp → {source_url[:80]}"
@@ -499,11 +579,44 @@ def run(db: BiDiDB, cfg, *, yt_dlp_timeout: int = 60,
                     logger.info(f"meta {i}: ok title={meta.get('title')!r}")
                 except ValueError as exc:
                     logger.info(f"meta {i}: URL non supportée, fallback step_send: {exc}")
-                except Exception as exc:
-                    db.mark_failed(email_id, "parsed", str(exc)[:500])
-                    stats["failed"] += 1
-                    logger.error(f"meta {i}: erreur yt-dlp: {exc}")
-                    continue
+                    # FIX : platform jamais renseigné dans ce chemin d'erreur
+                    # (extract_meta() n'a jamais tourné) → déduction via l'URL
+                    guessed = _guess_platform_from_url(source_url)
+                    if guessed:
+                        meta["platform"] = guessed
+                        logger.debug(f"meta {i}: platform déduit de l'URL → {guessed!r}")
+
+
+                
+                # FIX : chapitres PornHub — yt-dlp ne les fournit pas pour ce
+                # site, on scrape la page directement. Best-effort, jamais bloquant.
+                if "pornhub.com" in source_url.lower():
+                    try:
+                        html = _fetch_pornhub_page_html(source_url, yt_cookies)
+
+                        # DIAGNOSTIC : sauvegarde le HTML reçu pour inspection manuelle
+                        debug_dir = Path(__file__).resolve().parent.parent / "_debug_pornhub" 
+                        debug_dir.mkdir(parents=True, exist_ok=True)
+                        debug_path = debug_dir / f"email_{email_id}.html"
+                        debug_path.write_text(html, encoding="utf-8", errors="replace")
+                        logger.info(f"meta {i}: HTML sauvegardé → {debug_path}")
+
+                        logger.info(f"meta {i}: page pornhub récupérée ({len(html)} caractères)")
+                        logger.info(f"meta {i}: 'actionTags' présent ? {'\"actionTags\"' in html}")
+                        # Indices de blocage courants à surveiller manuellement dans le fichier
+                        for marker in ("age verification", "verify your age", "Access Denied",
+                                       "captcha", "are you 18", "This content is not available"):
+                            if marker.lower() in html.lower():
+                                logger.warning(f"meta {i}: marqueur de blocage détecté → {marker!r}")
+
+                        chapters = _extract_pornhub_chapters(html)
+                        if chapters:
+                            meta["chapters"] = chapters
+                            logger.info(f"meta {i}: {len(chapters)} chapitre(s) PornHub extrait(s)")
+                        else:
+                            logger.info(f"meta {i}: aucun chapitre PornHub trouvé")
+                    except Exception as e:
+                        logger.warning(f"meta {i}: extraction chapitres PornHub échouée: {e}")
 
         except Exception as exc:
             db.mark_failed(email_id, "parsed", str(exc)[:500])
@@ -546,6 +659,6 @@ if __name__ == "__main__":
     parser.add_argument("--retry-failed", action="store_true")
     args = parser.parse_args()
     cfg = get_config()
-    db = BiDiDB(cfg.get_db_path())
+    db = get_db()
     stats = run(db, cfg, retry_failed=args.retry_failed)
     print(f"Résultat meta: {stats}")
